@@ -8,8 +8,7 @@ void StructuredBmmOut::set_output_strided(
     int64_t output_idx,
     at::IntArrayRef sizes,
     at::IntArrayRef strides,
-    at::TensorOptions options,
-    at::DimnameList names) {
+    at::TensorOptions options) {
   out_.resize_(sizes);
 }
 
@@ -17,8 +16,7 @@ void StructuredBmmOut::set_output_raw_strided(
     int64_t output_idx,
     at::IntArrayRef sizes,
     at::IntArrayRef strides,
-    at::TensorOptions options,
-    at::DimnameList names) {
+    at::TensorOptions options) {
   out_.resize_(sizes);
 }
 

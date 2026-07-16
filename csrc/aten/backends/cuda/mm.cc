@@ -1,35 +1,23 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
+//
+// Reuse PyTorch's native CUDA kernel (registered at runtime by an externally
+// loaded libtorch_cuda.so) via device boxing, instead of a hand-written .cu.
+// out is pre-allocated (flagos), boxed to CUDA in place; at::mm_out writes into
+// its storage (shared GPU memory). Guard unboxes self/mat2/out on destruction.
 
 #include "../../mm.h"
+#include "../../device_boxing.h"
 
-#include <ATen/core/Tensor.h>
-#include <ATen/native/Resize.h>
-#include <ATen/ops/mm_native.h>
+#include <ATen/ops/mm.h>
 
 namespace at::native::flagos {
-
 namespace {
 
-void MmKernelCuda(
-    const at::Tensor& self,
-    const at::Tensor& mat2,
-    at::Tensor& out) {
-  struct cuda_impl final : public at::native::structured_mm_out_cuda {
-    explicit cuda_impl(at::Tensor& out) : out_(out) {}
-    void set_output_raw_strided(
-        int64_t, at::IntArrayRef sizes, at::IntArrayRef,
-        at::TensorOptions, at::DimnameList) override {
-      at::native::resize_output(out_, sizes);
-    }
-    const at::Tensor& maybe_get_output(int64_t) override { return out_; }
-    at::Tensor& out_;
-  };
-  cuda_impl op(out);
-  op.impl(self, mat2, out);
+void MmKernelCuda(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
+  DeviceBoxingGuard guard(self, mat2, out);
+  at::mm_out(out, self, mat2);
 }
 
 } // namespace
-
 REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kCuda, MmKernelCuda)
-
 } // namespace at::native::flagos

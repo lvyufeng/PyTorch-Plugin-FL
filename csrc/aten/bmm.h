@@ -21,15 +21,13 @@ struct StructuredBmmOut final : public at::meta::structured_bmm {
       int64_t output_idx,
       at::IntArrayRef sizes,
       at::IntArrayRef strides,
-      at::TensorOptions options,
-      at::DimnameList names) override;
+      at::TensorOptions options) override;
 
   void set_output_raw_strided(
       int64_t output_idx,
       at::IntArrayRef sizes,
       at::IntArrayRef strides,
-      at::TensorOptions options,
-      at::DimnameList names) override;
+      at::TensorOptions options) override;
 
   const at::Tensor& maybe_get_output(int64_t output_idx) override;
 
