@@ -16,6 +16,7 @@
 #include <ATen/ops/squeeze_native.h>
 #include <ATen/ops/unsqueeze_native.h>
 #include <ATen/ops/_unsafe_view_native.h>
+#include <ATen/ops/unfold_native.h>
 #include <ATen/ops/detach_native.h>
 
 namespace at::native::flagos {
@@ -99,6 +100,14 @@ at::Tensor unsqueeze(const at::Tensor& self, int64_t dim) {
 
 at::Tensor unsafe_view(const at::Tensor& self, at::IntArrayRef size) {
   return at::native::_unsafe_view(self, size);
+}
+
+// Pure-stride view: at::native::unfold computes the unfolded strides and calls
+// as_strided, which re-dispatches to the registered flagos as_strided (metadata
+// only, no recursion). Missing this registration made Tensor.repeat() fall back
+// to an invalid CPU view op and return uninitialized data.
+at::Tensor unfold(const at::Tensor& self, int64_t dimension, int64_t size, int64_t step) {
+  return at::native::unfold(self, dimension, size, step);
 }
 
 at::Tensor detach(const at::Tensor& self) {

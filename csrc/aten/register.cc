@@ -122,6 +122,17 @@ at::Tensor WrapperNarrow(const at::Tensor& self, int64_t dim, int64_t start, int
   return at::native::flagos::narrow(self, dim, start, length);
 }
 
+// unfold is a pure-stride view op. Without a flagos registration it falls back
+// to CPU, which is invalid for view ops (storage cannot be shared across
+// devices) -> PyTorch emits a warning and returns an uninitialized tensor.
+// This silently corrupts any op that relies on unfold internally, e.g.
+// Tensor.repeat() (which unfolds the result buffer and copy_'s into it),
+// producing garbage data. See GPTJ repeat/gather crash root-cause report.
+at::Tensor WrapperUnfold(
+    const at::Tensor& self, int64_t dimension, int64_t size, int64_t step) {
+  return at::native::flagos::unfold(self, dimension, size, step);
+}
+
 at::Tensor WrapperContiguous(
     const at::Tensor& self, at::MemoryFormat memory_format) {
   return at::native::flagos::contiguous(self, memory_format);
@@ -236,6 +247,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("view", WrapperView);
   m.impl("expand", WrapperExpand);
   m.impl("narrow", WrapperNarrow);
+  m.impl("unfold", WrapperUnfold);
   m.impl("contiguous", WrapperContiguous);
   m.impl("clone", WrapperClone);
   m.impl("_to_copy", WrapperToCopy);
