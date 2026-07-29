@@ -121,11 +121,9 @@ inline void UnboxTensorListToFlagos(at::TensorList tensors) {
   }
 }
 
-// Materialize an ITensorListRef into a std::vector<at::Tensor>.
-// The Tensor handles share the same TensorImpl as the originals, so boxing
-// them (device metadata rewrite) affects the underlying tensors in place.
-// The returned vector converts implicitly to at::TensorList (ArrayRef) for
-// passing to PyTorch's public at:: API, which expects TensorList not IListRef.
+// Materialize an ITensorListRef for general TensorList operators. The Tensor
+// handles share their TensorImpl with the originals, so metadata boxing affects
+// the original tensors and the vector can be passed as an at::TensorList.
 inline std::vector<at::Tensor> MaterializeToTensorVec(
     const at::ITensorListRef& list) {
   std::vector<at::Tensor> out;
@@ -136,27 +134,25 @@ inline std::vector<at::Tensor> MaterializeToTensorVec(
   return out;
 }
 
-// Drop "legacy empty" tensors (1-D with size 0) from a cat input list, matching
-// ATen's native cat `should_skip` rule. maca's forked libtorch_cuda cat kernel
-// takes a vectorized fast path when the non-empty tensor's numel is a multiple
-// of 128 that does not honor this legacy skip, so it applies the cat dim against
-// the empty tensor's 1-D rank and raises "Dimension out of range". Filtering
-// here reproduces stock PyTorch semantics (e.g. transformers' KV-cache
-// `torch.cat([torch.tensor([]), key_states], dim=-2)` on the first decode step).
-// If every tensor is legacy-empty the list is returned unchanged so at::cat
-// preserves its own empty-input behavior.
-inline std::vector<at::Tensor> DropLegacyEmptyForCat(
-    const std::vector<at::Tensor>& tensors) {
-  std::vector<at::Tensor> kept;
-  kept.reserve(tensors.size());
-  for (const auto& t : tensors) {
+// Materialize cat inputs while applying ATen's generic `should_skip` rule for
+// legacy empty tensors (1-D with size 0). Inline capacity removes the common
+// small-list heap allocation; SmallVector still grows for arbitrary list sizes.
+// Preserve the original list when every input is skipped so at::cat retains its
+// normal all-empty validation and result semantics.
+inline c10::SmallVector<at::Tensor, 4> MaterializeForCat(
+    const at::ITensorListRef& list) {
+  c10::SmallVector<at::Tensor, 4> kept;
+  kept.reserve(list.size());
+  for (const auto& t : list) {
     if (t.defined() && t.dim() == 1 && t.sym_size(0) == 0) {
       continue;
     }
     kept.push_back(t);
   }
   if (kept.empty()) {
-    return tensors;
+    for (const auto& t : list) {
+      kept.push_back(t);
+    }
   }
   return kept;
 }
