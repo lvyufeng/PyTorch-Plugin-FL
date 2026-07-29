@@ -19,6 +19,23 @@ import pytest
 from scripts import codegen_ops
 
 
+_MANUAL_METADATA_OPS = {
+    "_unsafe_view",
+    "detach",
+    "permute",
+    "select.int",
+    "slice.Tensor",
+    "squeeze",
+    "squeeze.dim",
+    "transpose.int",
+    "unsqueeze",
+}
+
+
+def test_pure_metadata_ops_are_excluded_from_generated_boxing():
+    assert _MANUAL_METADATA_OPS <= codegen_ops.MANUAL_REGISTERED_OPS
+
+
 _GROUP_NORM_ARGS = [
     ("const at::Tensor &", "input"),
     ("const ::std::optional<at::Tensor> &", "weight"),
