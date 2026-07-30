@@ -187,9 +187,6 @@ at::Tensor WrapperPrivCtcLossBackwardTensor(const at::Tensor & grad, const at::T
 at::Tensor & WrapperPrivCtcLossBackwardOut(const at::Tensor & grad, const at::Tensor & log_probs, const at::Tensor & targets, at::IntArrayRef input_lengths, at::IntArrayRef target_lengths, const at::Tensor & neg_log_likelihood, const at::Tensor & log_alpha, int64_t blank, bool zero_infinity, at::Tensor & out) {
   return at::native::flagos::priv_ctc_loss_backward_out_dispatcher(grad, log_probs, targets, input_lengths, target_lengths, neg_log_likelihood, log_alpha, blank, zero_infinity, out);
 }
-::std::tuple<at::Tensor,at::Tensor,at::Tensor> WrapperPrivCudnnAttentionBackward(const at::Tensor & grad_out, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const at::Tensor & out, const at::Tensor & logsumexp, const at::Tensor & philox_seed, const at::Tensor & philox_offset, const at::Tensor & attn_bias, const at::Tensor & cum_seq_q, const at::Tensor & cum_seq_k, int64_t max_q, int64_t max_k, double dropout_p, bool is_causal, ::std::optional<double> scale) {
-  return at::native::flagos::priv_cudnn_attention_backward_dispatcher(grad_out, query, key, value, out, logsumexp, philox_seed, philox_offset, attn_bias, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, scale);
-}
 ::std::tuple<at::Tensor,at::Tensor> WrapperPrivCudnnCtcLoss(const at::Tensor & log_probs, const at::Tensor & targets, at::IntArrayRef input_lengths, at::IntArrayRef target_lengths, int64_t blank, bool deterministic, bool zero_infinity) {
   return at::native::flagos::priv_cudnn_ctc_loss_dispatcher(log_probs, targets, input_lengths, target_lengths, blank, deterministic, zero_infinity);
 }
@@ -985,12 +982,6 @@ void WrapperPrivFusedAdagradOut(at::TensorList self, at::TensorList grads, at::T
 void WrapperPrivFusedAdagradTensorLrOut(at::TensorList self, at::TensorList grads, at::TensorList state_sums, at::TensorList state_steps, const at::Tensor & lr, double lr_decay, double weight_decay, double eps, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf, at::TensorList out) {
   at::native::flagos::priv_fused_adagrad_tensor_lr_out_dispatcher(self, grads, state_sums, state_steps, lr, lr_decay, weight_decay, eps, maximize, grad_scale, found_inf, out);
 }
-void WrapperPrivFusedAdagradInplace(at::TensorList self, at::TensorList grads, at::TensorList state_sums, at::TensorList state_steps, double lr, double lr_decay, double weight_decay, double eps, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf) {
-  at::native::flagos::priv_fused_adagrad_inplace_dispatcher(self, grads, state_sums, state_steps, lr, lr_decay, weight_decay, eps, maximize, grad_scale, found_inf);
-}
-void WrapperPrivFusedAdagradInplaceTensorLr(at::TensorList self, at::TensorList grads, at::TensorList state_sums, at::TensorList state_steps, const at::Tensor & lr, double lr_decay, double weight_decay, double eps, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf) {
-  at::native::flagos::priv_fused_adagrad_inplace_tensor_lr_dispatcher(self, grads, state_sums, state_steps, lr, lr_decay, weight_decay, eps, maximize, grad_scale, found_inf);
-}
 void WrapperPrivFusedAdamOut(at::TensorList self, at::TensorList grads, at::TensorList exp_avgs, at::TensorList exp_avg_sqs, at::TensorList max_exp_avg_sqs, at::TensorList state_steps, double lr, double beta1, double beta2, double weight_decay, double eps, bool amsgrad, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf, at::TensorList out) {
   at::native::flagos::priv_fused_adam_out_dispatcher(self, grads, exp_avgs, exp_avg_sqs, max_exp_avg_sqs, state_steps, lr, beta1, beta2, weight_decay, eps, amsgrad, maximize, grad_scale, found_inf, out);
 }
@@ -1029,9 +1020,6 @@ void WrapperPrivFusedAdamwInplaceTensorLr(at::TensorList self, at::TensorList gr
 }
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor,at::Tensor,at::Tensor> WrapperPrivFusedMovingAvgObsFqHelperFunctional(const at::Tensor & self, const at::Tensor & observer_on, const at::Tensor & fake_quant_on, const at::Tensor & running_min, const at::Tensor & running_max, const at::Tensor & scale, const at::Tensor & zero_point, double averaging_const, int64_t quant_min, int64_t quant_max, int64_t ch_axis, bool per_row_fake_quant, bool symmetric_quant) {
   return at::native::flagos::priv_fused_moving_avg_obs_fq_helper_functional_dispatcher(self, observer_on, fake_quant_on, running_min, running_max, scale, zero_point, averaging_const, quant_min, quant_max, ch_axis, per_row_fake_quant, symmetric_quant);
-}
-::std::tuple<at::Tensor,at::Tensor> WrapperPrivFusedRmsNormBackward(const at::Tensor & grad_out, const at::Tensor & input, at::IntArrayRef normalized_shape, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, ::std::array<bool,2> output_mask) {
-  return at::native::flagos::priv_fused_rms_norm_backward_dispatcher(grad_out, input, normalized_shape, rstd, weight, output_mask);
 }
 void WrapperPrivFusedSgdOut(at::TensorList self, at::TensorList grads, at::TensorList momentum_buffer_list, double weight_decay, double momentum, double lr, double dampening, bool nesterov, bool maximize, bool is_first_step, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf, at::TensorList out) {
   at::native::flagos::priv_fused_sgd_out_dispatcher(self, grads, momentum_buffer_list, weight_decay, momentum, lr, dampening, nesterov, maximize, is_first_step, grad_scale, found_inf, out);
@@ -1339,17 +1327,11 @@ at::Tensor & WrapperPrivSampleDirichletOut(const at::Tensor & self, ::std::optio
 at::Tensor WrapperPrivScaledGroupedMm(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & offs, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum) {
   return at::native::flagos::priv_scaled_grouped_mm_dispatcher(self, mat2, scale_a, scale_b, offs, bias, scale_result, out_dtype, use_fast_accum);
 }
-at::Tensor WrapperPrivScaledGroupedMmV2(const at::Tensor & self, const at::Tensor & mat2, at::TensorList scale_a, at::IntArrayRef recipe_a, at::IntArrayRef swizzle_a, at::TensorList scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const ::std::optional<at::Tensor> & offs, const ::std::optional<at::Tensor> & bias, ::std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum) {
-  return at::native::flagos::priv_scaled_grouped_mm_v2_dispatcher(self, mat2, scale_a, recipe_a, swizzle_a, scale_b, recipe_b, swizzle_b, offs, bias, out_dtype, contraction_dim, use_fast_accum);
-}
 at::Tensor WrapperPrivScaledMm(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum) {
   return at::native::flagos::priv_scaled_mm_dispatcher(self, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum);
 }
 at::Tensor & WrapperPrivScaledMmOut(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum, at::Tensor & out) {
   return at::native::flagos::priv_scaled_mm_out_dispatcher(self, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
-}
-at::Tensor WrapperPrivScaledMmV2(const at::Tensor & self, const at::Tensor & mat2, at::TensorList scale_a, at::IntArrayRef recipe_a, at::IntArrayRef swizzle_a, at::TensorList scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const ::std::optional<at::Tensor> & bias, ::std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum) {
-  return at::native::flagos::priv_scaled_mm_v2_dispatcher(self, mat2, scale_a, recipe_a, swizzle_a, scale_b, recipe_b, swizzle_b, bias, out_dtype, contraction_dim, use_fast_accum);
 }
 at::Tensor WrapperPrivSegmentReduceBackward(const at::Tensor & grad, const at::Tensor & output, const at::Tensor & data, c10::string_view reduce, const ::std::optional<at::Tensor> & lengths, const ::std::optional<at::Tensor> & offsets, int64_t axis, const ::std::optional<at::Scalar> & initial) {
   return at::native::flagos::priv_segment_reduce_backward_dispatcher(grad, output, data, reduce, lengths, offsets, axis, initial);
@@ -1668,9 +1650,6 @@ at::Tensor & WrapperPrivValuesCopyOut(const at::Tensor & self, at::Tensor & out)
 }
 at::Tensor WrapperPrivWeightInt4packMm(const at::Tensor & self, const at::Tensor & mat2, int64_t qGroupSize, const at::Tensor & qScaleAndZeros) {
   return at::native::flagos::priv_weight_int4pack_mm_dispatcher(self, mat2, qGroupSize, qScaleAndZeros);
-}
-at::Tensor WrapperPrivWeightInt8packMm(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scales) {
-  return at::native::flagos::priv_weight_int8pack_mm_dispatcher(self, mat2, scales);
 }
 ::std::tuple<at::Tensor,at::Tensor> WrapperPrivWeightNormInterface(const at::Tensor & v, const at::Tensor & g, int64_t dim) {
   return at::native::flagos::priv_weight_norm_interface_dispatcher(v, g, dim);
@@ -2572,6 +2551,12 @@ at::Tensor WrapperCudnnConvolutionAddRelu(const at::Tensor & self, const at::Ten
 at::Tensor & WrapperCudnnConvolutionAddReluOut(const at::Tensor & self, const at::Tensor & weight, const at::Tensor & z, const ::std::optional<at::Scalar> & alpha, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, int64_t groups, at::Tensor & out) {
   return at::native::flagos::cudnn_convolution_add_relu_out_dispatcher(self, weight, z, alpha, bias, stride, padding, dilation, groups, out);
 }
+at::Tensor WrapperCudnnConvolutionBiasFused(const at::Tensor & self, const at::Tensor & weight, const at::Tensor & bias, at::IntArrayRef padding, at::IntArrayRef stride, at::IntArrayRef dilation, int64_t groups, bool benchmark, bool deterministic, bool allow_tf32) {
+  return at::native::flagos::cudnn_convolution_bias_fused_dispatcher(self, weight, bias, padding, stride, dilation, groups, benchmark, deterministic, allow_tf32);
+}
+at::Tensor & WrapperCudnnConvolutionBiasFusedOut(const at::Tensor & self, const at::Tensor & weight, const at::Tensor & bias, at::IntArrayRef padding, at::IntArrayRef stride, at::IntArrayRef dilation, int64_t groups, bool benchmark, bool deterministic, bool allow_tf32, at::Tensor & out) {
+  return at::native::flagos::cudnn_convolution_bias_fused_out_dispatcher(self, weight, bias, padding, stride, dilation, groups, benchmark, deterministic, allow_tf32, out);
+}
 at::Tensor WrapperCudnnConvolutionRelu(const at::Tensor & self, const at::Tensor & weight, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, int64_t groups) {
   return at::native::flagos::cudnn_convolution_relu_dispatcher(self, weight, bias, stride, padding, dilation, groups);
 }
@@ -3264,12 +3249,6 @@ at::Tensor WrapperHardtanhBackward(const at::Tensor & grad_output, const at::Ten
 }
 at::Tensor & WrapperHardtanhBackwardGradInput(const at::Tensor & grad_output, const at::Tensor & self, const at::Scalar & min_val, const at::Scalar & max_val, at::Tensor & grad_input) {
   return at::native::flagos::hardtanh_backward_grad_input_dispatcher(grad_output, self, min_val, max_val, grad_input);
-}
-at::Tensor WrapperHashTensor(const at::Tensor & self, at::IntArrayRef dim, bool keepdim, int64_t mode) {
-  return at::native::flagos::hash_tensor_dispatcher(self, dim, keepdim, mode);
-}
-at::Tensor & WrapperHashTensorOut(const at::Tensor & self, at::IntArrayRef dim, bool keepdim, int64_t mode, at::Tensor & out) {
-  return at::native::flagos::hash_tensor_out_dispatcher(self, dim, keepdim, mode, out);
 }
 at::Tensor WrapperHeaviside(const at::Tensor & self, const at::Tensor & values) {
   return at::native::flagos::heaviside_dispatcher(self, values);
@@ -4573,12 +4552,6 @@ at::Tensor & WrapperRandOut(at::IntArrayRef size, at::Tensor & out) {
 at::Tensor WrapperRandLike(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
   return at::native::flagos::rand_like_dispatcher(self, dtype, layout, device, pin_memory, memory_format);
 }
-at::Tensor WrapperRandLikeGenerator(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  return at::native::flagos::rand_like_generator_dispatcher(self, generator, dtype, layout, device, pin_memory, memory_format);
-}
-at::Tensor & WrapperRandLikeGeneratorOut(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  return at::native::flagos::rand_like_generator_out_dispatcher(self, generator, memory_format, out);
-}
 at::Tensor & WrapperRandLikeOut(const at::Tensor & self, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   return at::native::flagos::rand_like_out_dispatcher(self, memory_format, out);
 }
@@ -4612,32 +4585,14 @@ at::Tensor WrapperRandintLike(const at::Tensor & self, int64_t high, ::std::opti
 at::Tensor WrapperRandintLikeTensor(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
   return at::native::flagos::randint_like_tensor_dispatcher(self, high, dtype, layout, device, pin_memory, memory_format);
 }
-at::Tensor WrapperRandintLikeTensorGenerator(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  return at::native::flagos::randint_like_tensor_generator_dispatcher(self, high, generator, dtype, layout, device, pin_memory, memory_format);
-}
-at::Tensor & WrapperRandintLikeTensorGeneratorOut(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  return at::native::flagos::randint_like_tensor_generator_out_dispatcher(self, high, generator, memory_format, out);
-}
 at::Tensor & WrapperRandintLikeTensorOut(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   return at::native::flagos::randint_like_tensor_out_dispatcher(self, high, memory_format, out);
-}
-at::Tensor WrapperRandintLikeGenerator(const at::Tensor & self, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  return at::native::flagos::randint_like_generator_dispatcher(self, high, generator, dtype, layout, device, pin_memory, memory_format);
-}
-at::Tensor & WrapperRandintLikeGeneratorOut(const at::Tensor & self, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  return at::native::flagos::randint_like_generator_out_dispatcher(self, high, generator, memory_format, out);
 }
 at::Tensor WrapperRandintLikeLowDtype(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
   return at::native::flagos::randint_like_low_dtype_dispatcher(self, low, high, dtype, layout, device, pin_memory, memory_format);
 }
 at::Tensor & WrapperRandintLikeLowDtypeOut(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   return at::native::flagos::randint_like_low_dtype_out_dispatcher(self, low, high, memory_format, out);
-}
-at::Tensor WrapperRandintLikeLowGeneratorDtype(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  return at::native::flagos::randint_like_low_generator_dtype_dispatcher(self, low, high, generator, dtype, layout, device, pin_memory, memory_format);
-}
-at::Tensor & WrapperRandintLikeLowGeneratorDtypeOut(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  return at::native::flagos::randint_like_low_generator_dtype_out_dispatcher(self, low, high, generator, memory_format, out);
 }
 at::Tensor & WrapperRandintLikeOut(const at::Tensor & self, int64_t high, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   return at::native::flagos::randint_like_out_dispatcher(self, high, memory_format, out);
@@ -4662,12 +4617,6 @@ at::Tensor & WrapperRandnNamesOut(at::IntArrayRef size, ::std::optional<at::Dimn
 }
 at::Tensor WrapperRandnLike(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
   return at::native::flagos::randn_like_dispatcher(self, dtype, layout, device, pin_memory, memory_format);
-}
-at::Tensor WrapperRandnLikeGenerator(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  return at::native::flagos::randn_like_generator_dispatcher(self, generator, dtype, layout, device, pin_memory, memory_format);
-}
-at::Tensor & WrapperRandnLikeGeneratorOut(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  return at::native::flagos::randn_like_generator_out_dispatcher(self, generator, memory_format, out);
 }
 at::Tensor & WrapperRandnLikeOut(const at::Tensor & self, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   return at::native::flagos::randn_like_out_dispatcher(self, memory_format, out);
@@ -6141,7 +6090,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("_ctc_loss_backward", WrapperPrivCtcLossBackward);
   m.impl("_ctc_loss_backward.Tensor", WrapperPrivCtcLossBackwardTensor);
   m.impl("_ctc_loss_backward.out", WrapperPrivCtcLossBackwardOut);
-  m.impl("_cudnn_attention_backward", WrapperPrivCudnnAttentionBackward);
   m.impl("_cudnn_ctc_loss", WrapperPrivCudnnCtcLoss);
   m.impl("_cudnn_ctc_loss.Tensor", WrapperPrivCudnnCtcLossTensor);
   m.impl("_cudnn_ctc_loss.out", WrapperPrivCudnnCtcLossOut);
@@ -6407,8 +6355,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("_functional_sym_constrain_range_for_size", WrapperPrivFunctionalSymConstrainRangeForSize);
   m.impl("_fused_adagrad.out", WrapperPrivFusedAdagradOut);
   m.impl("_fused_adagrad.tensor_lr_out", WrapperPrivFusedAdagradTensorLrOut);
-  m.impl("_fused_adagrad_", WrapperPrivFusedAdagradInplace);
-  m.impl("_fused_adagrad_.tensor_lr", WrapperPrivFusedAdagradInplaceTensorLr);
   m.impl("_fused_adam.out", WrapperPrivFusedAdamOut);
   m.impl("_fused_adam.tensor_lr_out", WrapperPrivFusedAdamTensorLrOut);
   m.impl("_fused_adam_", WrapperPrivFusedAdamInplace);
@@ -6422,7 +6368,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("_fused_moving_avg_obs_fq_helper", WrapperPrivFusedMovingAvgObsFqHelper);
   m.impl("_fused_moving_avg_obs_fq_helper.out", WrapperPrivFusedMovingAvgObsFqHelperOut);
   m.impl("_fused_moving_avg_obs_fq_helper_functional", WrapperPrivFusedMovingAvgObsFqHelperFunctional);
-  m.impl("_fused_rms_norm_backward", WrapperPrivFusedRmsNormBackward);
   m.impl("_fused_sgd.out", WrapperPrivFusedSgdOut);
   m.impl("_fused_sgd.tensor_lr_out", WrapperPrivFusedSgdTensorLrOut);
   m.impl("_fused_sgd_", WrapperPrivFusedSgdInplace);
@@ -6525,10 +6470,8 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("_scaled_dot_product_flash_attention_backward", WrapperPrivScaledDotProductFlashAttentionBackward);
   m.impl("_scaled_dot_product_fused_attention_overrideable_backward", WrapperPrivScaledDotProductFusedAttentionOverrideableBackward);
   m.impl("_scaled_grouped_mm", WrapperPrivScaledGroupedMm);
-  m.impl("_scaled_grouped_mm_v2", WrapperPrivScaledGroupedMmV2);
   m.impl("_scaled_mm", WrapperPrivScaledMm);
   m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
-  m.impl("_scaled_mm_v2", WrapperPrivScaledMmV2);
   m.impl("_segment_reduce_backward", WrapperPrivSegmentReduceBackward);
   m.impl("_segment_reduce_backward.out", WrapperPrivSegmentReduceBackwardOut);
   m.impl("_slow_conv2d_backward.grad_input", WrapperPrivSlowConv2dBackwardGradInput);
@@ -6635,7 +6578,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("_upsample_nearest_exact3d_backward.grad_input", WrapperPrivUpsampleNearestExact3dBackwardGradInput);
   m.impl("_values_copy.out", WrapperPrivValuesCopyOut);
   m.impl("_weight_int4pack_mm", WrapperPrivWeightInt4packMm);
-  m.impl("_weight_int8pack_mm", WrapperPrivWeightInt8packMm);
   m.impl("_weight_norm_interface", WrapperPrivWeightNormInterface);
   m.impl("_weight_norm_interface.out", WrapperPrivWeightNormInterfaceOut);
   m.impl("_weight_norm_interface_backward", WrapperPrivWeightNormInterfaceBackward);
@@ -6936,6 +6878,8 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("cudnn_convolution.out", WrapperCudnnConvolutionOut);
   m.impl("cudnn_convolution_add_relu", WrapperCudnnConvolutionAddRelu);
   m.impl("cudnn_convolution_add_relu.out", WrapperCudnnConvolutionAddReluOut);
+  m.impl("cudnn_convolution_bias_fused", WrapperCudnnConvolutionBiasFused);
+  m.impl("cudnn_convolution_bias_fused.out", WrapperCudnnConvolutionBiasFusedOut);
   m.impl("cudnn_convolution_relu", WrapperCudnnConvolutionRelu);
   m.impl("cudnn_convolution_relu.out", WrapperCudnnConvolutionReluOut);
   m.impl("cudnn_convolution_transpose", WrapperCudnnConvolutionTranspose);
@@ -7167,8 +7111,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("hardtanh_", WrapperHardtanhInplace);
   m.impl("hardtanh_backward", WrapperHardtanhBackward);
   m.impl("hardtanh_backward.grad_input", WrapperHardtanhBackwardGradInput);
-  m.impl("hash_tensor", WrapperHashTensor);
-  m.impl("hash_tensor.out", WrapperHashTensorOut);
   m.impl("heaviside", WrapperHeaviside);
   m.impl("heaviside.out", WrapperHeavisideOut);
   m.impl("heaviside_", WrapperHeavisideInplace);
@@ -7603,8 +7545,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("rand.names_out", WrapperRandNamesOut);
   m.impl("rand.out", WrapperRandOut);
   m.impl("rand_like", WrapperRandLike);
-  m.impl("rand_like.generator", WrapperRandLikeGenerator);
-  m.impl("rand_like.generator_out", WrapperRandLikeGeneratorOut);
   m.impl("rand_like.out", WrapperRandLikeOut);
   m.impl("randint", WrapperRandint);
   m.impl("randint.generator", WrapperRandintGenerator);
@@ -7616,15 +7556,9 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("randint.out", WrapperRandintOut);
   m.impl("randint_like", WrapperRandintLike);
   m.impl("randint_like.Tensor", WrapperRandintLikeTensor);
-  m.impl("randint_like.Tensor_generator", WrapperRandintLikeTensorGenerator);
-  m.impl("randint_like.Tensor_generator_out", WrapperRandintLikeTensorGeneratorOut);
   m.impl("randint_like.Tensor_out", WrapperRandintLikeTensorOut);
-  m.impl("randint_like.generator", WrapperRandintLikeGenerator);
-  m.impl("randint_like.generator_out", WrapperRandintLikeGeneratorOut);
   m.impl("randint_like.low_dtype", WrapperRandintLikeLowDtype);
   m.impl("randint_like.low_dtype_out", WrapperRandintLikeLowDtypeOut);
-  m.impl("randint_like.low_generator_dtype", WrapperRandintLikeLowGeneratorDtype);
-  m.impl("randint_like.low_generator_dtype_out", WrapperRandintLikeLowGeneratorDtypeOut);
   m.impl("randint_like.out", WrapperRandintLikeOut);
   m.impl("randn", WrapperRandn);
   m.impl("randn.generator", WrapperRandnGenerator);
@@ -7633,8 +7567,6 @@ at::Tensor & WrapperZerosLikeOut(const at::Tensor & self, ::std::optional<at::Me
   m.impl("randn.names", WrapperRandnNames);
   m.impl("randn.names_out", WrapperRandnNamesOut);
   m.impl("randn_like", WrapperRandnLike);
-  m.impl("randn_like.generator", WrapperRandnLikeGenerator);
-  m.impl("randn_like.generator_out", WrapperRandnLikeGeneratorOut);
   m.impl("randn_like.out", WrapperRandnLikeOut);
   m.impl("random", WrapperRandom);
   m.impl("random.from", WrapperRandomFrom);

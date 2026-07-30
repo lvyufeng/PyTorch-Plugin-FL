@@ -39,7 +39,6 @@
 #include <ATen/ops/_cslt_sparse_mm.h>
 #include <ATen/ops/_ctc_loss.h>
 #include <ATen/ops/_ctc_loss_backward.h>
-#include <ATen/ops/_cudnn_attention_backward.h>
 #include <ATen/ops/_cudnn_ctc_loss.h>
 #include <ATen/ops/_cudnn_init_dropout_state.h>
 #include <ATen/ops/_cudnn_rnn_backward.h>
@@ -120,7 +119,6 @@
 #include <ATen/ops/_fused_adamw.h>
 #include <ATen/ops/_fused_dropout.h>
 #include <ATen/ops/_fused_moving_avg_obs_fq_helper.h>
-#include <ATen/ops/_fused_rms_norm_backward.h>
 #include <ATen/ops/_fused_sgd.h>
 #include <ATen/ops/_fw_primal_copy.h>
 #include <ATen/ops/_grid_sampler_2d_cpu_fallback.h>
@@ -190,9 +188,7 @@
 #include <ATen/ops/_scaled_dot_product_flash_attention_backward.h>
 #include <ATen/ops/_scaled_dot_product_fused_attention_overrideable_backward.h>
 #include <ATen/ops/_scaled_grouped_mm.h>
-#include <ATen/ops/_scaled_grouped_mm_v2.h>
 #include <ATen/ops/_scaled_mm.h>
-#include <ATen/ops/_scaled_mm_v2.h>
 #include <ATen/ops/_segment_reduce_backward.h>
 #include <ATen/ops/_slow_conv2d_backward.h>
 #include <ATen/ops/_slow_conv2d_forward.h>
@@ -265,7 +261,6 @@
 #include <ATen/ops/_upsample_nearest_exact3d_backward.h>
 #include <ATen/ops/_values_copy.h>
 #include <ATen/ops/_weight_int4pack_mm.h>
-#include <ATen/ops/_weight_int8pack_mm.h>
 #include <ATen/ops/_weight_norm_interface.h>
 #include <ATen/ops/_weight_norm_interface_backward.h>
 #include <ATen/ops/abs.h>
@@ -373,6 +368,7 @@
 #include <ATen/ops/cudnn_batch_norm_backward.h>
 #include <ATen/ops/cudnn_convolution.h>
 #include <ATen/ops/cudnn_convolution_add_relu.h>
+#include <ATen/ops/cudnn_convolution_bias_fused.h>
 #include <ATen/ops/cudnn_convolution_relu.h>
 #include <ATen/ops/cudnn_convolution_transpose.h>
 #include <ATen/ops/cudnn_grid_sampler.h>
@@ -460,7 +456,6 @@
 #include <ATen/ops/hardswish_backward.h>
 #include <ATen/ops/hardtanh.h>
 #include <ATen/ops/hardtanh_backward.h>
-#include <ATen/ops/hash_tensor.h>
 #include <ATen/ops/heaviside.h>
 #include <ATen/ops/histc.h>
 #include <ATen/ops/huber_loss.h>
@@ -1308,15 +1303,6 @@ at::Tensor & PrivCtcLossBackwardOutKernelCuda(const at::Tensor & grad, const at:
   at::_ctc_loss_backward_outf(grad, log_probs, targets, input_lengths, target_lengths, neg_log_likelihood, log_alpha, blank, zero_infinity, out);
   UnboxToFlagos(out);
   return out;
-}
-
-::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivCudnnAttentionBackwardKernelCuda(const at::Tensor & grad_out, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const at::Tensor & out, const at::Tensor & logsumexp, const at::Tensor & philox_seed, const at::Tensor & philox_offset, const at::Tensor & attn_bias, const at::Tensor & cum_seq_q, const at::Tensor & cum_seq_k, int64_t max_q, int64_t max_k, double dropout_p, bool is_causal, ::std::optional<double> scale) {
-  DeviceBoxingGuard guard(grad_out, query, key, value, out, logsumexp, philox_seed, philox_offset, attn_bias, cum_seq_q, cum_seq_k);
-  auto result = at::_cudnn_attention_backward(grad_out, query, key, value, out, logsumexp, philox_seed, philox_offset, attn_bias, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, scale);
-  UnboxToFlagos(std::get<0>(result));
-  UnboxToFlagos(std::get<1>(result));
-  UnboxToFlagos(std::get<2>(result));
-  return result;
 }
 
 ::std::tuple<at::Tensor,at::Tensor> PrivCudnnCtcLossKernelCuda(const at::Tensor & log_probs, const at::Tensor & targets, at::IntArrayRef input_lengths, at::IntArrayRef target_lengths, int64_t blank, bool deterministic, bool zero_infinity) {
@@ -3705,32 +3691,6 @@ void PrivFusedAdagradTensorLrOutKernelCuda(at::TensorList self, at::TensorList g
   at::_fused_adagrad_outf(self_vec, grads_vec, state_sums_vec, state_steps_vec, lr, lr_decay, weight_decay, eps, maximize, grad_scale, found_inf, out_vec);
 }
 
-void PrivFusedAdagradInplaceKernelCuda(at::TensorList self, at::TensorList grads, at::TensorList state_sums, at::TensorList state_steps, double lr, double lr_decay, double weight_decay, double eps, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf) {
-  auto self_vec = MaterializeToTensorVec(self);
-  auto grads_vec = MaterializeToTensorVec(grads);
-  auto state_sums_vec = MaterializeToTensorVec(state_sums);
-  auto state_steps_vec = MaterializeToTensorVec(state_steps);
-  TensorListBoxingGuard guard;
-  guard.box(self_vec);
-  guard.box(grads_vec);
-  guard.box(state_sums_vec);
-  guard.box(state_steps_vec);
-  at::_fused_adagrad_(self_vec, grads_vec, state_sums_vec, state_steps_vec, lr, lr_decay, weight_decay, eps, maximize, grad_scale, found_inf);
-}
-
-void PrivFusedAdagradInplaceTensorLrKernelCuda(at::TensorList self, at::TensorList grads, at::TensorList state_sums, at::TensorList state_steps, const at::Tensor & lr, double lr_decay, double weight_decay, double eps, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf) {
-  auto self_vec = MaterializeToTensorVec(self);
-  auto grads_vec = MaterializeToTensorVec(grads);
-  auto state_sums_vec = MaterializeToTensorVec(state_sums);
-  auto state_steps_vec = MaterializeToTensorVec(state_steps);
-  TensorListBoxingGuard guard;
-  guard.box(self_vec);
-  guard.box(grads_vec);
-  guard.box(state_sums_vec);
-  guard.box(state_steps_vec);
-  at::_fused_adagrad_(self_vec, grads_vec, state_sums_vec, state_steps_vec, lr, lr_decay, weight_decay, eps, maximize, grad_scale, found_inf);
-}
-
 void PrivFusedAdamOutKernelCuda(at::TensorList self, at::TensorList grads, at::TensorList exp_avgs, at::TensorList exp_avg_sqs, at::TensorList max_exp_avg_sqs, at::TensorList state_steps, double lr, double beta1, double beta2, double weight_decay, double eps, bool amsgrad, bool maximize, const ::std::optional<at::Tensor> & grad_scale, const ::std::optional<at::Tensor> & found_inf, at::TensorList out) {
   auto self_vec = MaterializeToTensorVec(self);
   auto grads_vec = MaterializeToTensorVec(grads);
@@ -3920,15 +3880,6 @@ void PrivFusedAdamwInplaceTensorLrKernelCuda(at::TensorList self, at::TensorList
   UnboxToFlagos(std::get<3>(result));
   UnboxToFlagos(std::get<4>(result));
   UnboxToFlagos(std::get<5>(result));
-  return result;
-}
-
-::std::tuple<at::Tensor,at::Tensor> PrivFusedRmsNormBackwardKernelCuda(const at::Tensor & grad_out, const at::Tensor & input, at::IntArrayRef normalized_shape, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, ::std::array<bool,2> output_mask) {
-  at::Tensor weight_t = weight.has_value() ? *weight : at::Tensor();
-  DeviceBoxingGuard guard(grad_out, input, rstd, weight_t);
-  auto result = at::_fused_rms_norm_backward(grad_out, input, normalized_shape, rstd, weight, output_mask);
-  UnboxToFlagos(std::get<0>(result));
-  UnboxToFlagos(std::get<1>(result));
   return result;
 }
 
@@ -4761,17 +4712,6 @@ at::Tensor PrivScaledGroupedMmKernelCuda(const at::Tensor & self, const at::Tens
   return result;
 }
 
-at::Tensor PrivScaledGroupedMmV2KernelCuda(const at::Tensor & self, const at::Tensor & mat2, at::TensorList scale_a, at::IntArrayRef recipe_a, at::IntArrayRef swizzle_a, at::TensorList scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const ::std::optional<at::Tensor> & offs, const ::std::optional<at::Tensor> & bias, ::std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum) {
-  auto scale_a_vec = MaterializeToTensorVec(scale_a);
-  auto scale_b_vec = MaterializeToTensorVec(scale_b);
-  TensorListBoxingGuard guard;
-  guard.box(scale_a_vec);
-  guard.box(scale_b_vec);
-  auto result = at::_scaled_grouped_mm_v2(self, mat2, scale_a_vec, recipe_a, swizzle_a, scale_b_vec, recipe_b, swizzle_b, offs, bias, out_dtype, contraction_dim, use_fast_accum);
-  UnboxToFlagos(result);
-  return result;
-}
-
 at::Tensor PrivScaledMmKernelCuda(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scale_a, const at::Tensor & scale_b, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & scale_result, ::std::optional<at::ScalarType> out_dtype, bool use_fast_accum) {
   at::Tensor bias_t = bias.has_value() ? *bias : at::Tensor();
   at::Tensor scale_result_t = scale_result.has_value() ? *scale_result : at::Tensor();
@@ -4788,17 +4728,6 @@ at::Tensor & PrivScaledMmOutKernelCuda(const at::Tensor & self, const at::Tensor
   at::_scaled_mm_outf(self, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
   UnboxToFlagos(out);
   return out;
-}
-
-at::Tensor PrivScaledMmV2KernelCuda(const at::Tensor & self, const at::Tensor & mat2, at::TensorList scale_a, at::IntArrayRef recipe_a, at::IntArrayRef swizzle_a, at::TensorList scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const ::std::optional<at::Tensor> & bias, ::std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum) {
-  auto scale_a_vec = MaterializeToTensorVec(scale_a);
-  auto scale_b_vec = MaterializeToTensorVec(scale_b);
-  TensorListBoxingGuard guard;
-  guard.box(scale_a_vec);
-  guard.box(scale_b_vec);
-  auto result = at::_scaled_mm_v2(self, mat2, scale_a_vec, recipe_a, swizzle_a, scale_b_vec, recipe_b, swizzle_b, bias, out_dtype, contraction_dim, use_fast_accum);
-  UnboxToFlagos(result);
-  return result;
 }
 
 at::Tensor PrivSegmentReduceBackwardKernelCuda(const at::Tensor & grad, const at::Tensor & output, const at::Tensor & data, c10::string_view reduce, const ::std::optional<at::Tensor> & lengths, const ::std::optional<at::Tensor> & offsets, int64_t axis, const ::std::optional<at::Scalar> & initial) {
@@ -5625,13 +5554,6 @@ at::Tensor & PrivValuesCopyOutKernelCuda(const at::Tensor & self, at::Tensor & o
 at::Tensor PrivWeightInt4packMmKernelCuda(const at::Tensor & self, const at::Tensor & mat2, int64_t qGroupSize, const at::Tensor & qScaleAndZeros) {
   DeviceBoxingGuard guard(self, mat2, qScaleAndZeros);
   auto result = at::_weight_int4pack_mm(self, mat2, qGroupSize, qScaleAndZeros);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor PrivWeightInt8packMmKernelCuda(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scales) {
-  DeviceBoxingGuard guard(self, mat2, scales);
-  auto result = at::_weight_int8pack_mm(self, mat2, scales);
   UnboxToFlagos(result);
   return result;
 }
@@ -7355,9 +7277,7 @@ at::Tensor & ClampInplaceKernelCuda(at::Tensor & self, const ::std::optional<at:
 }
 
 at::Tensor & ClampInplaceTensorKernelCuda(at::Tensor & self, const ::std::optional<at::Tensor> & min, const ::std::optional<at::Tensor> & max) {
-  at::Tensor min_t = min.has_value() ? *min : at::Tensor();
-  at::Tensor max_t = max.has_value() ? *max : at::Tensor();
-  DeviceBoxingGuard guard(self, min_t, max_t);
+  DeviceBoxingGuard guard(self);
   self.clamp_(min, max);
   return self;
 }
@@ -7851,6 +7771,20 @@ at::Tensor & CudnnConvolutionAddReluOutKernelCuda(const at::Tensor & self, const
   at::Tensor bias_t = bias.has_value() ? *bias : at::Tensor();
   DeviceBoxingGuard guard(self, weight, z, out, bias_t);
   at::cudnn_convolution_add_relu_outf(self, weight, z, alpha, bias, stride, padding, dilation, groups, out);
+  UnboxToFlagos(out);
+  return out;
+}
+
+at::Tensor CudnnConvolutionBiasFusedKernelCuda(const at::Tensor & self, const at::Tensor & weight, const at::Tensor & bias, at::IntArrayRef padding, at::IntArrayRef stride, at::IntArrayRef dilation, int64_t groups, bool benchmark, bool deterministic, bool allow_tf32) {
+  DeviceBoxingGuard guard(self, weight, bias);
+  auto result = at::cudnn_convolution_bias_fused(self, weight, bias, padding, stride, dilation, groups, benchmark, deterministic, allow_tf32);
+  UnboxToFlagos(result);
+  return result;
+}
+
+at::Tensor & CudnnConvolutionBiasFusedOutKernelCuda(const at::Tensor & self, const at::Tensor & weight, const at::Tensor & bias, at::IntArrayRef padding, at::IntArrayRef stride, at::IntArrayRef dilation, int64_t groups, bool benchmark, bool deterministic, bool allow_tf32, at::Tensor & out) {
+  DeviceBoxingGuard guard(self, weight, bias, out);
+  at::cudnn_convolution_bias_fused_outf(self, weight, bias, padding, stride, dilation, groups, benchmark, deterministic, allow_tf32, out);
   UnboxToFlagos(out);
   return out;
 }
@@ -9548,20 +9482,6 @@ at::Tensor & HardtanhBackwardGradInputKernelCuda(const at::Tensor & grad_output,
   at::hardtanh_backward_outf(grad_output, self, min_val, max_val, grad_input);
   UnboxToFlagos(grad_input);
   return grad_input;
-}
-
-at::Tensor HashTensorKernelCuda(const at::Tensor & self, at::IntArrayRef dim, bool keepdim, int64_t mode) {
-  DeviceBoxingGuard guard(self);
-  auto result = at::hash_tensor(self, dim, keepdim, mode);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor & HashTensorOutKernelCuda(const at::Tensor & self, at::IntArrayRef dim, bool keepdim, int64_t mode, at::Tensor & out) {
-  DeviceBoxingGuard guard(self, out);
-  at::hash_tensor_outf(self, dim, keepdim, mode, out);
-  UnboxToFlagos(out);
-  return out;
 }
 
 at::Tensor HeavisideKernelCuda(const at::Tensor & self, const at::Tensor & values) {
@@ -12845,20 +12765,6 @@ at::Tensor RandLikeKernelCuda(const at::Tensor & self, ::std::optional<at::Scala
   return result;
 }
 
-at::Tensor RandLikeGeneratorKernelCuda(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  DeviceBoxingGuard guard(self);
-  auto result = at::rand_like(self, generator, dtype, layout, device, pin_memory, memory_format);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor & RandLikeGeneratorOutKernelCuda(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  DeviceBoxingGuard guard(self, out);
-  at::rand_like_outf(self, generator, memory_format, out);
-  UnboxToFlagos(out);
-  return out;
-}
-
 at::Tensor & RandLikeOutKernelCuda(const at::Tensor & self, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   DeviceBoxingGuard guard(self, out);
   at::rand_like_outf(self, memory_format, out);
@@ -12964,37 +12870,9 @@ at::Tensor RandintLikeTensorKernelCuda(const at::Tensor & self, const at::Tensor
   return result;
 }
 
-at::Tensor RandintLikeTensorGeneratorKernelCuda(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  DeviceBoxingGuard guard(self, high);
-  auto result = at::randint_like(self, high, generator, dtype, layout, device, pin_memory, memory_format);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor & RandintLikeTensorGeneratorOutKernelCuda(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  DeviceBoxingGuard guard(self, high, out);
-  at::randint_like_outf(self, high, generator, memory_format, out);
-  UnboxToFlagos(out);
-  return out;
-}
-
 at::Tensor & RandintLikeTensorOutKernelCuda(const at::Tensor & self, const at::Tensor & high, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   DeviceBoxingGuard guard(self, high, out);
   at::randint_like_outf(self, high, memory_format, out);
-  UnboxToFlagos(out);
-  return out;
-}
-
-at::Tensor RandintLikeGeneratorKernelCuda(const at::Tensor & self, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  DeviceBoxingGuard guard(self);
-  auto result = at::randint_like(self, high, generator, dtype, layout, device, pin_memory, memory_format);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor & RandintLikeGeneratorOutKernelCuda(const at::Tensor & self, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  DeviceBoxingGuard guard(self, out);
-  at::randint_like_outf(self, high, generator, memory_format, out);
   UnboxToFlagos(out);
   return out;
 }
@@ -13009,20 +12887,6 @@ at::Tensor RandintLikeLowDtypeKernelCuda(const at::Tensor & self, int64_t low, i
 at::Tensor & RandintLikeLowDtypeOutKernelCuda(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
   DeviceBoxingGuard guard(self, out);
   at::randint_like_outf(self, low, high, memory_format, out);
-  UnboxToFlagos(out);
-  return out;
-}
-
-at::Tensor RandintLikeLowGeneratorDtypeKernelCuda(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  DeviceBoxingGuard guard(self);
-  auto result = at::randint_like(self, low, high, generator, dtype, layout, device, pin_memory, memory_format);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor & RandintLikeLowGeneratorDtypeOutKernelCuda(const at::Tensor & self, int64_t low, int64_t high, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  DeviceBoxingGuard guard(self, out);
-  at::randint_like_outf(self, low, high, generator, memory_format, out);
   UnboxToFlagos(out);
   return out;
 }
@@ -13109,20 +12973,6 @@ at::Tensor RandnLikeKernelCuda(const at::Tensor & self, ::std::optional<at::Scal
   auto result = at::randn_like(self, dtype, layout, device, pin_memory, memory_format);
   UnboxToFlagos(result);
   return result;
-}
-
-at::Tensor RandnLikeGeneratorKernelCuda(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  DeviceBoxingGuard guard(self);
-  auto result = at::randn_like(self, generator, dtype, layout, device, pin_memory, memory_format);
-  UnboxToFlagos(result);
-  return result;
-}
-
-at::Tensor & RandnLikeGeneratorOutKernelCuda(const at::Tensor & self, ::std::optional<at::Generator> generator, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
-  DeviceBoxingGuard guard(self, out);
-  at::randn_like_outf(self, generator, memory_format, out);
-  UnboxToFlagos(out);
-  return out;
 }
 
 at::Tensor & RandnLikeOutKernelCuda(const at::Tensor & self, ::std::optional<at::MemoryFormat> memory_format, at::Tensor & out) {
@@ -16534,7 +16384,6 @@ REGISTER_IMPL_TO_DISPATCHER(PrivCtcLossOutFn, priv_ctc_loss_out_dispatcher, Back
 REGISTER_IMPL_TO_DISPATCHER(PrivCtcLossBackwardFn, priv_ctc_loss_backward_dispatcher, Backend::kCuda, PrivCtcLossBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivCtcLossBackwardTensorFn, priv_ctc_loss_backward_tensor_dispatcher, Backend::kCuda, PrivCtcLossBackwardTensorKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivCtcLossBackwardOutFn, priv_ctc_loss_backward_out_dispatcher, Backend::kCuda, PrivCtcLossBackwardOutKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivCudnnAttentionBackwardFn, priv_cudnn_attention_backward_dispatcher, Backend::kCuda, PrivCudnnAttentionBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivCudnnCtcLossFn, priv_cudnn_ctc_loss_dispatcher, Backend::kCuda, PrivCudnnCtcLossKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivCudnnCtcLossTensorFn, priv_cudnn_ctc_loss_tensor_dispatcher, Backend::kCuda, PrivCudnnCtcLossTensorKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivCudnnCtcLossOutFn, priv_cudnn_ctc_loss_out_dispatcher, Backend::kCuda, PrivCudnnCtcLossOutKernelCuda)
@@ -16800,8 +16649,6 @@ REGISTER_IMPL_TO_DISPATCHER(PrivFunctionalSymConstrainRangeFn, priv_functional_s
 REGISTER_IMPL_TO_DISPATCHER(PrivFunctionalSymConstrainRangeForSizeFn, priv_functional_sym_constrain_range_for_size_dispatcher, Backend::kCuda, PrivFunctionalSymConstrainRangeForSizeKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdagradOutFn, priv_fused_adagrad_out_dispatcher, Backend::kCuda, PrivFusedAdagradOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdagradTensorLrOutFn, priv_fused_adagrad_tensor_lr_out_dispatcher, Backend::kCuda, PrivFusedAdagradTensorLrOutKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdagradInplaceFn, priv_fused_adagrad_inplace_dispatcher, Backend::kCuda, PrivFusedAdagradInplaceKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdagradInplaceTensorLrFn, priv_fused_adagrad_inplace_tensor_lr_dispatcher, Backend::kCuda, PrivFusedAdagradInplaceTensorLrKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdamOutFn, priv_fused_adam_out_dispatcher, Backend::kCuda, PrivFusedAdamOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdamTensorLrOutFn, priv_fused_adam_tensor_lr_out_dispatcher, Backend::kCuda, PrivFusedAdamTensorLrOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedAdamInplaceFn, priv_fused_adam_inplace_dispatcher, Backend::kCuda, PrivFusedAdamInplaceKernelCuda)
@@ -16815,7 +16662,6 @@ REGISTER_IMPL_TO_DISPATCHER(PrivFusedDropoutOutFn, priv_fused_dropout_out_dispat
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedMovingAvgObsFqHelperFn, priv_fused_moving_avg_obs_fq_helper_dispatcher, Backend::kCuda, PrivFusedMovingAvgObsFqHelperKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedMovingAvgObsFqHelperOutFn, priv_fused_moving_avg_obs_fq_helper_out_dispatcher, Backend::kCuda, PrivFusedMovingAvgObsFqHelperOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedMovingAvgObsFqHelperFunctionalFn, priv_fused_moving_avg_obs_fq_helper_functional_dispatcher, Backend::kCuda, PrivFusedMovingAvgObsFqHelperFunctionalKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivFusedRmsNormBackwardFn, priv_fused_rms_norm_backward_dispatcher, Backend::kCuda, PrivFusedRmsNormBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedSgdOutFn, priv_fused_sgd_out_dispatcher, Backend::kCuda, PrivFusedSgdOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedSgdTensorLrOutFn, priv_fused_sgd_tensor_lr_out_dispatcher, Backend::kCuda, PrivFusedSgdTensorLrOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivFusedSgdInplaceFn, priv_fused_sgd_inplace_dispatcher, Backend::kCuda, PrivFusedSgdInplaceKernelCuda)
@@ -16918,10 +16764,8 @@ REGISTER_IMPL_TO_DISPATCHER(PrivScaledDotProductEfficientAttentionBackwardFn, pr
 REGISTER_IMPL_TO_DISPATCHER(PrivScaledDotProductFlashAttentionBackwardFn, priv_scaled_dot_product_flash_attention_backward_dispatcher, Backend::kCuda, PrivScaledDotProductFlashAttentionBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivScaledDotProductFusedAttentionOverrideableBackwardFn, priv_scaled_dot_product_fused_attention_overrideable_backward_dispatcher, Backend::kCuda, PrivScaledDotProductFusedAttentionOverrideableBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivScaledGroupedMmFn, priv_scaled_grouped_mm_dispatcher, Backend::kCuda, PrivScaledGroupedMmKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivScaledGroupedMmV2Fn, priv_scaled_grouped_mm_v2_dispatcher, Backend::kCuda, PrivScaledGroupedMmV2KernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivScaledMmFn, priv_scaled_mm_dispatcher, Backend::kCuda, PrivScaledMmKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivScaledMmOutFn, priv_scaled_mm_out_dispatcher, Backend::kCuda, PrivScaledMmOutKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivScaledMmV2Fn, priv_scaled_mm_v2_dispatcher, Backend::kCuda, PrivScaledMmV2KernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivSegmentReduceBackwardFn, priv_segment_reduce_backward_dispatcher, Backend::kCuda, PrivSegmentReduceBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivSegmentReduceBackwardOutFn, priv_segment_reduce_backward_out_dispatcher, Backend::kCuda, PrivSegmentReduceBackwardOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivSlowConv2dBackwardGradInputFn, priv_slow_conv2d_backward_grad_input_dispatcher, Backend::kCuda, PrivSlowConv2dBackwardGradInputKernelCuda)
@@ -17028,7 +16872,6 @@ REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact3dBackwardFn, priv_upsample_
 REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact3dBackwardGradInputFn, priv_upsample_nearest_exact3d_backward_grad_input_dispatcher, Backend::kCuda, PrivUpsampleNearestExact3dBackwardGradInputKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivValuesCopyOutFn, priv_values_copy_out_dispatcher, Backend::kCuda, PrivValuesCopyOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivWeightInt4packMmFn, priv_weight_int4pack_mm_dispatcher, Backend::kCuda, PrivWeightInt4packMmKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(PrivWeightInt8packMmFn, priv_weight_int8pack_mm_dispatcher, Backend::kCuda, PrivWeightInt8packMmKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivWeightNormInterfaceFn, priv_weight_norm_interface_dispatcher, Backend::kCuda, PrivWeightNormInterfaceKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivWeightNormInterfaceOutFn, priv_weight_norm_interface_out_dispatcher, Backend::kCuda, PrivWeightNormInterfaceOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(PrivWeightNormInterfaceBackwardFn, priv_weight_norm_interface_backward_dispatcher, Backend::kCuda, PrivWeightNormInterfaceBackwardKernelCuda)
@@ -17329,6 +17172,8 @@ REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionFn, cudnn_convolution_dispatcher, Ba
 REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionOutFn, cudnn_convolution_out_dispatcher, Backend::kCuda, CudnnConvolutionOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionAddReluFn, cudnn_convolution_add_relu_dispatcher, Backend::kCuda, CudnnConvolutionAddReluKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionAddReluOutFn, cudnn_convolution_add_relu_out_dispatcher, Backend::kCuda, CudnnConvolutionAddReluOutKernelCuda)
+REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionBiasFusedFn, cudnn_convolution_bias_fused_dispatcher, Backend::kCuda, CudnnConvolutionBiasFusedKernelCuda)
+REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionBiasFusedOutFn, cudnn_convolution_bias_fused_out_dispatcher, Backend::kCuda, CudnnConvolutionBiasFusedOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionReluFn, cudnn_convolution_relu_dispatcher, Backend::kCuda, CudnnConvolutionReluKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionReluOutFn, cudnn_convolution_relu_out_dispatcher, Backend::kCuda, CudnnConvolutionReluOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(CudnnConvolutionTransposeFn, cudnn_convolution_transpose_dispatcher, Backend::kCuda, CudnnConvolutionTransposeKernelCuda)
@@ -17560,8 +17405,6 @@ REGISTER_IMPL_TO_DISPATCHER(HardtanhOutFn, hardtanh_out_dispatcher, Backend::kCu
 REGISTER_IMPL_TO_DISPATCHER(HardtanhInplaceFn, hardtanh_inplace_dispatcher, Backend::kCuda, HardtanhInplaceKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(HardtanhBackwardFn, hardtanh_backward_dispatcher, Backend::kCuda, HardtanhBackwardKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(HardtanhBackwardGradInputFn, hardtanh_backward_grad_input_dispatcher, Backend::kCuda, HardtanhBackwardGradInputKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(HashTensorFn, hash_tensor_dispatcher, Backend::kCuda, HashTensorKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(HashTensorOutFn, hash_tensor_out_dispatcher, Backend::kCuda, HashTensorOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(HeavisideFn, heaviside_dispatcher, Backend::kCuda, HeavisideKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(HeavisideOutFn, heaviside_out_dispatcher, Backend::kCuda, HeavisideOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(HeavisideInplaceFn, heaviside_inplace_dispatcher, Backend::kCuda, HeavisideInplaceKernelCuda)
@@ -17996,8 +17839,6 @@ REGISTER_IMPL_TO_DISPATCHER(RandNamesFn, rand_names_dispatcher, Backend::kCuda, 
 REGISTER_IMPL_TO_DISPATCHER(RandNamesOutFn, rand_names_out_dispatcher, Backend::kCuda, RandNamesOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandOutFn, rand_out_dispatcher, Backend::kCuda, RandOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandLikeFn, rand_like_dispatcher, Backend::kCuda, RandLikeKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandLikeGeneratorFn, rand_like_generator_dispatcher, Backend::kCuda, RandLikeGeneratorKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandLikeGeneratorOutFn, rand_like_generator_out_dispatcher, Backend::kCuda, RandLikeGeneratorOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandLikeOutFn, rand_like_out_dispatcher, Backend::kCuda, RandLikeOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintFn, randint_dispatcher, Backend::kCuda, RandintKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintGeneratorFn, randint_generator_dispatcher, Backend::kCuda, RandintGeneratorKernelCuda)
@@ -18009,15 +17850,9 @@ REGISTER_IMPL_TO_DISPATCHER(RandintLowOutFn, randint_low_out_dispatcher, Backend
 REGISTER_IMPL_TO_DISPATCHER(RandintOutFn, randint_out_dispatcher, Backend::kCuda, RandintOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintLikeFn, randint_like_dispatcher, Backend::kCuda, RandintLikeKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintLikeTensorFn, randint_like_tensor_dispatcher, Backend::kCuda, RandintLikeTensorKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandintLikeTensorGeneratorFn, randint_like_tensor_generator_dispatcher, Backend::kCuda, RandintLikeTensorGeneratorKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandintLikeTensorGeneratorOutFn, randint_like_tensor_generator_out_dispatcher, Backend::kCuda, RandintLikeTensorGeneratorOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintLikeTensorOutFn, randint_like_tensor_out_dispatcher, Backend::kCuda, RandintLikeTensorOutKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandintLikeGeneratorFn, randint_like_generator_dispatcher, Backend::kCuda, RandintLikeGeneratorKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandintLikeGeneratorOutFn, randint_like_generator_out_dispatcher, Backend::kCuda, RandintLikeGeneratorOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintLikeLowDtypeFn, randint_like_low_dtype_dispatcher, Backend::kCuda, RandintLikeLowDtypeKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintLikeLowDtypeOutFn, randint_like_low_dtype_out_dispatcher, Backend::kCuda, RandintLikeLowDtypeOutKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandintLikeLowGeneratorDtypeFn, randint_like_low_generator_dtype_dispatcher, Backend::kCuda, RandintLikeLowGeneratorDtypeKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandintLikeLowGeneratorDtypeOutFn, randint_like_low_generator_dtype_out_dispatcher, Backend::kCuda, RandintLikeLowGeneratorDtypeOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandintLikeOutFn, randint_like_out_dispatcher, Backend::kCuda, RandintLikeOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandnFn, randn_dispatcher, Backend::kCuda, RandnKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandnGeneratorFn, randn_generator_dispatcher, Backend::kCuda, RandnGeneratorKernelCuda)
@@ -18026,8 +17861,6 @@ REGISTER_IMPL_TO_DISPATCHER(RandnGeneratorWithNamesOutFn, randn_generator_with_n
 REGISTER_IMPL_TO_DISPATCHER(RandnNamesFn, randn_names_dispatcher, Backend::kCuda, RandnNamesKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandnNamesOutFn, randn_names_out_dispatcher, Backend::kCuda, RandnNamesOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandnLikeFn, randn_like_dispatcher, Backend::kCuda, RandnLikeKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandnLikeGeneratorFn, randn_like_generator_dispatcher, Backend::kCuda, RandnLikeGeneratorKernelCuda)
-REGISTER_IMPL_TO_DISPATCHER(RandnLikeGeneratorOutFn, randn_like_generator_out_dispatcher, Backend::kCuda, RandnLikeGeneratorOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandnLikeOutFn, randn_like_out_dispatcher, Backend::kCuda, RandnLikeOutKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandomFn, random_dispatcher, Backend::kCuda, RandomKernelCuda)
 REGISTER_IMPL_TO_DISPATCHER(RandomFromFn, random_from_dispatcher, Backend::kCuda, RandomFromKernelCuda)
