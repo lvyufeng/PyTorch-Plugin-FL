@@ -44,6 +44,7 @@ venv/
 ENV/
 
 # Misc
+*.md
 *.log
 .DS_Store
 Thumbs.db

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mx-smi*)",
+      "Bash(ruff check *)",
+      "Bash(docker exec *)",
+      "Bash(python *)",
+      "Bash(python3 *)"
+    ]
+  }
+}
