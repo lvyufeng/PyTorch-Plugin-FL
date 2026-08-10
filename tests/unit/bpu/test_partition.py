@@ -168,3 +168,109 @@ def test_backend_falls_back_without_hbdk(caplog, monkeypatch):
 
     torch.testing.assert_close(got, expected)
     assert "no hbdk4 compiler reachable" in caplog.text
+
+
+# -- transformer coverage ------------------------------------------------------
+
+
+class RMSNormBlock(torch.nn.Module):
+    """RMSNorm + gated MLP: the shape of every layer in a recent LLM."""
+
+    def __init__(self, d=64):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.ones(d))
+        self.fc1 = torch.nn.Linear(d, 2 * d)
+        self.fc2 = torch.nn.Linear(2 * d, d)
+
+    def forward(self, x):
+        v = x.pow(2).mean(-1, keepdim=True)
+        y = x * torch.rsqrt(v + 1e-6) * self.w
+        return x + self.fc2(torch.nn.functional.silu(self.fc1(y)))
+
+
+def test_rmsnorm_block_is_one_partition():
+    """`pow` and `rsqrt` are what a norm is made of.
+
+    Without them on the whitelist the graph splits at every norm: 86% of the
+    nodes offloaded across two partitions, each paying its own boundary copy,
+    for an op hbdk4 lowers entirely to b30vpu (checked with
+    `convert(advice=True)`: 6 ops, zero CPU fallbacks).
+    """
+    from torch_fl.accelerator.bpu.decompose import decompose
+
+    gm, _ = _aot_graph(RMSNormBlock().eval(), torch.randn(1, 8, 64))
+    decompose(gm)  # as the backend does, before partitioning
+    parts = partition_graph(gm, min_nodes=2)
+
+    assert len(parts) == 1, summarize(gm, parts)
+    targets = {n.target for n in parts[0].nodes}
+    assert torch.ops.aten.pow.Tensor_Scalar in targets
+    assert torch.ops.aten.rsqrt.default in targets
+
+    compute = [n for n in gm.graph.nodes if n.op == "call_function"]
+    assert len(parts[0].nodes) == len(compute), "every compute node should offload"
+
+
+def test_slice_does_not_split_a_partition():
+    """Attention takes its causal window with `slice`, once per layer."""
+
+    class Sliced(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x[:, :4] * 2) + 1
+
+    gm, _ = _aot_graph(Sliced(), torch.randn(2, 8))
+    parts = partition_graph(gm, min_nodes=1)
+
+    assert len(parts) == 1, summarize(gm, parts)
+
+
+def test_compile_model_forward_reaches_backend():
+    """torch.compile(model) + model.generate() bypasses the backend entirely.
+
+    OptimizedModule.__getattr__ forwards `.generate` to the original module,
+    bound to self there, so generate()'s internal forward calls never enter
+    Dynamo. The fix for generation is `model.forward = torch.compile(...)`,
+    which makes generate() call the compiled forward.
+
+    This test locks down that the workaround actually invokes the backend.
+    """
+    try:
+        from transformers import AutoConfig, AutoModelForCausalLM
+    except ImportError:
+        import pytest
+
+        pytest.skip("transformers not available")
+
+    # Spy backend that counts invocations
+    call_count = {"n": 0}
+
+    def spy_backend(gm, example_inputs):
+        call_count["n"] += 1
+        return gm.forward
+
+    # Tiny config
+    cfg = AutoConfig.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    cfg.num_hidden_layers = 1
+    cfg.hidden_size = 64
+    cfg.intermediate_size = 128
+    cfg.num_attention_heads = 4
+    cfg.num_key_value_heads = 2
+    model = AutoModelForCausalLM.from_config(cfg).eval()
+
+    # Test 1: torch.compile(model.forward) invokes backend during generate()
+    call_count["n"] = 0
+    model.forward = torch.compile(model.forward, backend=spy_backend, fullgraph=False)
+    ids = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        model.generate(ids, max_new_tokens=4, do_sample=False, pad_token_id=0)
+    assert call_count["n"] > 0, "backend was never called during generate()"
+
+    # Test 2: torch.compile(model) does NOT invoke backend during generate()
+    call_count["n"] = 0
+    model2 = AutoModelForCausalLM.from_config(cfg).eval()
+    compiled = torch.compile(model2, backend=spy_backend, fullgraph=False)
+    with torch.no_grad():
+        compiled.generate(ids, max_new_tokens=4, do_sample=False, pad_token_id=0)
+    assert call_count["n"] == 0, (
+        "backend should not be called when compiling the module"
+    )
