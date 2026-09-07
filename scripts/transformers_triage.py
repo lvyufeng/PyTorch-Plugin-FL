@@ -42,6 +42,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+CPU_FALLBACK_CLASS = "OP_CPU_FALLBACK"
+
 
 def extract_op_name(detail: str) -> str:
     """Extract aten operator name from error message."""
@@ -100,7 +102,7 @@ def normalize_error(text: str) -> str:
     return t[-200:]
 
 
-def detect_crash(test_record: Dict, run_info: Dict) -> Tuple[bool, str]:
+def detect_crash(test_record: Dict) -> Tuple[bool, str]:
     """
     Detect crash patterns using platform-agnostic signals.
 
@@ -108,47 +110,47 @@ def detect_crash(test_record: Dict, run_info: Dict) -> Tuple[bool, str]:
     """
     detail = test_record.get("detail", "")
 
-    # 1. Run-level device poisoning
-    if run_info.get("context_poison"):
-        return True, "device_context_poisoned"
+    # A run-level poison marker invalidates later tests, but it does not prove
+    # that every failed test caused the poison. Classify only per-test evidence.
 
-    # 2. Segmentation fault (universal)
+    # 1. Segmentation fault (universal)
     if "segmentation fault" in detail.lower() or "sigsegv" in detail.lower():
         return True, "segfault"
 
-    # 3. Core dump
+    # 2. Core dump
     if "core dumped" in detail.lower():
         return True, "core_dump"
 
-    # 4. Test timeout
+    # 3. Test timeout
     if test_record.get("timed_out"):
         return True, "timeout"
 
-    # 5. Fatal Python error
+    # 4. Fatal Python error
     if "fatal python error" in detail.lower():
         return True, "fatal_python_error"
 
-    # 6. Generic runtime errors (platform-agnostic patterns)
-    runtime_patterns = [
-        r"runtime error",
-        r"device error",
-        r"kernel.*(?:error|failed)",
-        r"launch.*(?:error|failed)",
-        r"memory.*(?:error|access)",
-        r"invalid.*(?:device|kernel)",
+    # 5. Explicit device-side crash signatures. A normal RuntimeError is not a
+    # crash: unsupported operators and feature gaps often use that exception.
+    crash_patterns = [
+        r"illegal memory access",
+        r"device-side assert",
+        r"unspecified launch failure",
+        r"misaligned address",
+        r"vmfault",
+        r"acceleratorerror",
     ]
-    for pattern in runtime_patterns:
+    for pattern in crash_patterns:
         if re.search(pattern, detail, re.I):
-            return True, "runtime_error"
+            return True, "device_runtime_crash"
 
-    # 7. Process crash (no detail but failed)
+    # 6. Process crash (no detail but failed)
     if test_record["status"] == "FAIL" and not detail.strip():
         return True, "empty_failure_likely_crash"
 
     return False, ""
 
 
-def classify_failure(test_record: Dict, run_info: Dict) -> Tuple[str, str]:
+def classify_failure(test_record: Dict) -> Tuple[str, str]:
     """
     Classify a test failure.
 
@@ -166,7 +168,7 @@ def classify_failure(test_record: Dict, run_info: Dict) -> Tuple[str, str]:
     nodeid = test_record["nodeid"]
 
     # Check crash first
-    is_crash, crash_type = detect_crash(test_record, run_info)
+    is_crash, crash_type = detect_crash(test_record)
     if is_crash:
         return "CRASH", crash_type
 
@@ -208,13 +210,14 @@ def classify_failure(test_record: Dict, run_info: Dict) -> Tuple[str, str]:
     return "UNKNOWN", "unclassified"
 
 
-def compute_fingerprint(failure_class: str, subject: str, mechanism: str) -> str:
-    """
-    Compute cause fingerprint for deduplication.
-
-    Does NOT include model name or nodeid, so same issue across models merges.
-    """
-    payload = f"{failure_class}|{subject}|{mechanism}"
+def compute_fingerprint(
+    failure_class: str,
+    component: str,
+    subject: str,
+    mechanism: str,
+) -> str:
+    """Compute a cause fingerprint without model or nodeid occurrence data."""
+    payload = "|".join((failure_class, component, subject, mechanism))
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
@@ -233,14 +236,57 @@ def extract_model_from_nodeid(nodeid: str) -> str:
     return "unknown"
 
 
+def extract_component(test_json: Dict) -> str:
+    """Identify the measured backend for cross-platform cause deduplication."""
+    environment = test_json.get("environment", {})
+    device = environment.get("device") or test_json.get("run", {}).get("device")
+    return str(device or "unknown")
+
+
+def fallback_findings(test_json: Dict, component: str) -> list[Dict]:
+    """Turn measured CPU fallbacks into operator implementation findings."""
+    occurrences: dict[str, list[dict]] = defaultdict(list)
+    for test in test_json.get("tests", []):
+        for op in test.get("cpu_fallback_ops", []):
+            occurrences[op].append(test)
+
+    findings = []
+    for op, tests in sorted(occurrences.items()):
+        mechanism = f"[flagos cpu_fallback] {op}"
+        findings.append(
+            {
+                "fingerprint": compute_fingerprint(
+                    CPU_FALLBACK_CLASS, component, op, mechanism
+                ),
+                "class": CPU_FALLBACK_CLASS,
+                "component": component,
+                "subject": op,
+                "mechanism": mechanism,
+                "nodeids": [test["nodeid"] for test in tests],
+                "models": sorted(
+                    {extract_model_from_nodeid(test["nodeid"]) for test in tests}
+                ),
+                "representative_nodeid": tests[0]["nodeid"],
+                "representative_detail": (
+                    f"{op} executed through torch_fl's CPU fallback while the "
+                    "test otherwise continued."
+                ),
+                "count": len(tests),
+                "verification_required": False,
+                "verdict": "CONFIRMED",
+            }
+        )
+    return findings
+
+
 def triage_failures(test_json: Dict) -> Dict:
     """
     Triage all test failures and group by cause fingerprint.
 
     Returns findings dict with fingerprinted failures.
     """
-    run_info = test_json.get("run", {})
     tests = test_json.get("tests", [])
+    component = extract_component(test_json)
 
     # Collect failures
     failures = [t for t in tests if t["status"] == "FAIL"]
@@ -250,17 +296,18 @@ def triage_failures(test_json: Dict) -> Dict:
     class_counts = defaultdict(int)
 
     for test in failures:
-        failure_class, subject = classify_failure(test, run_info)
+        failure_class, subject = classify_failure(test)
         class_counts[failure_class.lower().replace("_", "")] += 1
 
         mechanism = normalize_error(test.get("detail", ""))
-        fingerprint = compute_fingerprint(failure_class, subject, mechanism)
+        fingerprint = compute_fingerprint(failure_class, component, subject, mechanism)
 
         fingerprint_map[fingerprint].append(
             {
                 "nodeid": test["nodeid"],
                 "detail": test.get("detail", ""),
                 "class": failure_class,
+                "component": component,
                 "subject": subject,
                 "mechanism": mechanism,
                 "model": extract_model_from_nodeid(test["nodeid"]),
@@ -281,6 +328,7 @@ def triage_failures(test_json: Dict) -> Dict:
             {
                 "fingerprint": fingerprint,
                 "class": rep["class"],
+                "component": rep["component"],
                 "subject": rep["subject"],
                 "mechanism": rep["mechanism"],
                 "nodeids": nodeids,
@@ -291,10 +339,17 @@ def triage_failures(test_json: Dict) -> Dict:
             }
         )
 
-    # Sort by class priority: CRASH > OP_UNSUPPORTED > PRECISION > FEATURE > UNKNOWN
+    # CPU fallback is a correctness-success but an accelerator coverage failure.
+    fallback_items = fallback_findings(test_json, component)
+    findings.extend(fallback_items)
+    if fallback_items:
+        class_counts[CPU_FALLBACK_CLASS.lower().replace("_", "")] += len(fallback_items)
+
+    # Sort by class priority: CRASH > unsupported/fallback > precision > feature.
     priority = {
         "CRASH": 0,
         "OP_UNSUPPORTED": 1,
+        CPU_FALLBACK_CLASS: 1,
         "PRECISION": 2,
         "FEATURE_UNSUPPORTED": 3,
         "PRECISION_KNOWN_ISSUE": 4,

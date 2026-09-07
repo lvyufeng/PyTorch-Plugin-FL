@@ -34,22 +34,28 @@ was:
 [flagos-musa] musaFree(0x10019600000) failed: an illegal memory access was encountered
 ```
 
-Because the device context was poisoned, failures after the first accelerator
-fault are not considered independently verified findings. The device-poisoning
-finding was filed as issue #250 after the run-level poison signal was confirmed;
-the remaining test failures were not filed individually. The raw JSON report
-remains outside the repository at `/tmp/qwen3.json`.
+Because the device context was poisoned, this baseline did not initially treat
+later failures as independent findings. A corrected isolation pass subsequently
+found that the resilient harness had passed both the architecture directory and
+the selected nodeid to pytest, which silently reran all 297 collected tests.
+After fixing that selector bug, all 20 nodeids were rerun one at a time in fresh
+processes (`collected == 1` per invocation).
 
-This first sweep is both the initial baseline and the source of one verified
-tracker finding. It is recorded as an observed defect on the pinned tuple, not
-as a regression claim.
+The corrected verification grouped the 20 occurrences into these tracked causes:
 
-The issue reference is retained here so future runs can distinguish the known
-poisoning cause from new findings:
+| Class | Subject | Affected tests | Issue |
+| --- | --- | ---: | --- |
+| `CRASH` | qwen3 device context poisoning / model parallelism trigger | 1 | [#250](https://github.com/flagos-ai/Torch-FL/issues/250), [#265](https://github.com/flagos-ai/Torch-FL/issues/265) |
+| `OP_UNSUPPORTED` | mudnn softmax rejects non-contiguous input | 9 | [#262](https://github.com/flagos-ai/Torch-FL/issues/262), [#268](https://github.com/flagos-ai/Torch-FL/issues/268) |
+| `FEATURE_UNSUPPORTED` | ProcessGroupGloo rejects `flagos` tensors | 6 | [#263](https://github.com/flagos-ai/Torch-FL/issues/263) |
+| `FEATURE_UNSUPPORTED` | TorchInductor/Triton requires CUDA libraries | 2 | [#264](https://github.com/flagos-ai/Torch-FL/issues/264) |
+| `OP_UNSUPPORTED` | mudnn `TRUEDIV` with `INT64` | 2 | [#266](https://github.com/flagos-ai/Torch-FL/issues/266) |
 
-| Fingerprint | Class | Subject | Issue |
-| --- | --- | --- | --- |
-| Pending cause-level fingerprint | `CRASH` | qwen3 device context poisoning | [#250](https://github.com/flagos-ai/Torch-FL/issues/250) |
+Issue #267 was closed and replaced by #268 because its first draft listed
+incorrect parameterized nodeids. The initial baseline remains useful as the raw
+suite measurement, but the corrected per-test isolation is the evidence used for
+root-cause filing. Raw JSON remains outside the repository at
+`/tmp/qwen3.json` and `/tmp/qwen3_isolated_results_v2.json`.
 
 ### Failed test inventory
 
@@ -80,8 +86,9 @@ The 20 failed tests were grouped for follow-up investigation:
   `test_model_parallelism`,
   `test_model_rope_scaling_frequencies`.
 
-The SDPA failures require an isolated rerun with a CPU same-dtype baseline and
-aten attribution before classification. The remaining failures likewise need
-isolated subprocess runs to distinguish the first fault from collateral
-failures. Cause fingerprints and issue references will be added only after the
-findings pass the evidence and deduplication gates.
+The inventory above records the original suite grouping. The corrected
+single-nodeid reruns supersede its provisional labels; in particular, the eight
+SDPA-named tests reproduced the same non-contiguous softmax failure rather than a
+pure tolerance mismatch. Future measurements must also run with
+`FLAGOS_LOG_FALLBACK=1` and report any passing operation that used CPU fallback
+as an accelerator coverage gap.

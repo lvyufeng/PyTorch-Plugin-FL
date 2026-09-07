@@ -71,6 +71,8 @@ def extract_baseline_fingerprints(coverage_file: Path) -> Dict[str, str]:
 def search_github_issues(
     fingerprint: str,
     repo: str,
+    subject: str,
+    component: str,
 ) -> Optional[str]:
     """
     Search GitHub issues for fingerprint.
@@ -82,7 +84,7 @@ def search_github_issues(
     Returns:
         "issue #123" if found, None otherwise
     """
-    # Search in issue bodies
+    # Search fingerprints in issue bodies first.
     cmd = [
         "gh",
         "api",
@@ -106,7 +108,6 @@ def search_github_issues(
         )
 
         if result.returncode == 0 and result.stdout.strip():
-            # Found in issue body
             first_match = result.stdout.strip().split("\n")[0]
             return first_match
 
@@ -133,6 +134,31 @@ def search_github_issues(
         if result.returncode == 0 and result.stdout.strip():
             first_match = result.stdout.strip().split("\n")[0]
             return first_match
+
+        # Fingerprints are new, so older issues need a semantic fallback. Search
+        # only after exact body/comment checks, then require human review before
+        # deciding whether the candidate has the same mechanism and component.
+        query = f'"{subject}" repo:{repo} is:issue'
+        semantic = subprocess.run(
+            [
+                "gh",
+                "api",
+                "search/issues",
+                "-X",
+                "GET",
+                "-f",
+                f"q={query}",
+                "--jq",
+                '.items[] | "#\\(.number) \\(.state) \\(.title)"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if semantic.returncode == 0 and semantic.stdout.strip():
+            first_match = semantic.stdout.strip().split("\n")[0]
+            return f"semantic candidate for {component}: {first_match}"
 
     except subprocess.TimeoutExpired:
         print(f"  Warning: GitHub search timed out for {fingerprint}")
@@ -173,6 +199,8 @@ def deduplicate_findings(
         "IN_BASELINE": 0,
         "DUPLICATE": 0,
         "COLLATERAL": 0,
+        "INCONCLUSIVE": 0,
+        "REVIEW_CANDIDATE": 0,
     }
 
     for i, finding in enumerate(findings):
@@ -190,6 +218,16 @@ def deduplicate_findings(
             )
             continue
 
+        if verdict == "INCONCLUSIVE":
+            finding["dedup_status"] = "INCONCLUSIVE"
+            finding["dedup_ref"] = "isolation did not produce a test verdict"
+            finding["should_file"] = False
+            dedup_counts["INCONCLUSIVE"] += 1
+            print(
+                f"  [{i + 1}/{len(findings)}] {finding['subject']}: INCONCLUSIVE (skip)"
+            )
+            continue
+
         # Check baseline
         if fp in baseline_fps:
             finding["dedup_status"] = "IN_BASELINE"
@@ -203,14 +241,25 @@ def deduplicate_findings(
 
         # Check GitHub issues
         if not skip_github:
-            github_match = search_github_issues(fp, repo)
+            github_match = search_github_issues(
+                fp,
+                repo,
+                finding["subject"],
+                finding.get("component", "unknown"),
+            )
             if github_match:
-                finding["dedup_status"] = "DUPLICATE"
+                finding["dedup_status"] = (
+                    "REVIEW_CANDIDATE"
+                    if github_match.startswith("semantic candidate")
+                    else "DUPLICATE"
+                )
                 finding["dedup_ref"] = github_match
                 finding["should_file"] = False
-                dedup_counts["DUPLICATE"] += 1
+                dedup_counts.setdefault(finding["dedup_status"], 0)
+                dedup_counts[finding["dedup_status"]] += 1
                 print(
-                    f"  [{i + 1}/{len(findings)}] {finding['subject']}: DUPLICATE ({github_match})"
+                    f"  [{i + 1}/{len(findings)}] {finding['subject']}: "
+                    f"{finding['dedup_status']} ({github_match})"
                 )
                 continue
 

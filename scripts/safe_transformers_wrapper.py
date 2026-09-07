@@ -67,14 +67,16 @@ def validate_model(model: str) -> str:
 
     # Check fuzzy match (allow hyphens/underscores)
     for allowed in ALLOWED_MODELS:
-        if model_lower.replace("-", "").replace("_", "") == allowed.replace("-", "").replace("_", ""):
+        if model_lower.replace("-", "").replace("_", "") == allowed.replace(
+            "-", ""
+        ).replace("_", ""):
             return allowed
 
     print(f"ERROR: Model '{model}' not in allowlist", file=sys.stderr)
     print(f"Allowed models: {', '.join(ALLOWED_MODELS)}", file=sys.stderr)
-    print(f"", file=sys.stderr)
-    print(f"To see all available models, run:", file=sys.stderr)
-    print(f"  python scripts/safe_transformers_wrapper.py list-models", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("To see all available models, run:", file=sys.stderr)
+    print("  python scripts/safe_transformers_wrapper.py list-models", file=sys.stderr)
     sys.exit(1)
 
 
@@ -109,7 +111,7 @@ def cmd_test(args):
     device = validate_device(args.device)
     repo = args.repo or "flagos-ai/Torch-FL"
 
-    print(f"▶ Running transformers test:")
+    print("▶ Running transformers test:")
     print(f"  Model:  {model}")
     print(f"  Device: {device}")
     print(f"  Chip:   {chip}")
@@ -140,8 +142,8 @@ def cmd_batch(args):
     device = validate_device(args.device)
     repo = args.repo or "flagos-ai/Torch-FL"
 
-    print(f"▶ Running batch transformers test:")
-    print(f"  Models: bert, qwen3")
+    print("▶ Running batch transformers test:")
+    print("  Models: bert, qwen3")
     print(f"  Device: {device}")
     print(f"  Chip:   {chip}")
     print(f"  Repo:   {repo}")
@@ -173,10 +175,10 @@ def cmd_list_models(args):
 
     print()
     print("To test a model:")
-    print(f"  python scripts/safe_transformers_wrapper.py test <model> <chip>")
+    print("  python scripts/safe_transformers_wrapper.py test <model> <chip>")
     print()
     print("Example:")
-    print(f"  python scripts/safe_transformers_wrapper.py test bert GCU")
+    print("  python scripts/safe_transformers_wrapper.py test bert GCU")
     return 0
 
 
@@ -188,52 +190,32 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # test command
-    test_parser = subparsers.add_parser(
-        "test",
-        help="test a single model"
+    test_parser = subparsers.add_parser("test", help="test a single model")
+    test_parser.add_argument(
+        "model", help=f"model name (allowed: {', '.join(ALLOWED_MODELS[:5])}...)"
     )
     test_parser.add_argument(
-        "model",
-        help=f"model name (allowed: {', '.join(ALLOWED_MODELS[:5])}...)"
+        "chip", help="chip name for issue titles (e.g., GCU, MUSA)"
     )
     test_parser.add_argument(
-        "chip",
-        help=f"chip name for issue titles (e.g., GCU, MUSA)"
+        "--device", default="gcu", help="device name for torch (default: gcu)"
     )
-    test_parser.add_argument(
-        "--device",
-        default="gcu",
-        help="device name for torch (default: gcu)"
-    )
-    test_parser.add_argument(
-        "--repo",
-        help="GitHub repo (default: flagos-ai/Torch-FL)"
-    )
+    test_parser.add_argument("--repo", help="GitHub repo (default: flagos-ai/Torch-FL)")
 
     # batch command
-    batch_parser = subparsers.add_parser(
-        "batch",
-        help="batch test (bert + qwen3)"
+    batch_parser = subparsers.add_parser("batch", help="batch test (bert + qwen3)")
+    batch_parser.add_argument(
+        "chip", help="chip name for issue titles (e.g., GCU, MUSA)"
     )
     batch_parser.add_argument(
-        "chip",
-        help="chip name for issue titles (e.g., GCU, MUSA)"
+        "--device", default="gcu", help="device name for torch (default: gcu)"
     )
     batch_parser.add_argument(
-        "--device",
-        default="gcu",
-        help="device name for torch (default: gcu)"
-    )
-    batch_parser.add_argument(
-        "--repo",
-        help="GitHub repo (default: flagos-ai/Torch-FL)"
+        "--repo", help="GitHub repo (default: flagos-ai/Torch-FL)"
     )
 
     # list-models command
-    subparsers.add_parser(
-        "list-models",
-        help="list all available models"
-    )
+    subparsers.add_parser("list-models", help="list all available models")
 
     return parser
 

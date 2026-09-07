@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-end automation: test → triage → verify → deduplicate → file issues
+# End-to-end measurement: test → triage → verify → deduplicate → preview issues
 # Copyright 2026 FlagOS Contributors
 
 set -e
@@ -25,7 +25,7 @@ WORK_DIR=/tmp/transformers-auto-sweep-${MODEL}-$(date +%Y%m%d-%H%M%S)
 mkdir -p ${WORK_DIR}
 
 echo "======================================================================="
-echo "Transformers Auto Sweep + Issue Filing"
+echo "Transformers Auto Sweep + Issue Preview"
 echo "======================================================================="
 echo "Model:    $MODEL"
 echo "Device:   $DEVICE"
@@ -86,14 +86,15 @@ if [ "$CLASSIFIED_COUNT" -eq 0 ]; then
     exit 0
 fi
 
-# Step 3: Verify (parallel isolation)
+# Step 3: Verify (serial isolation)
 echo ""
-echo "[3/6] Verifying failures in isolation (parallel)..."
+echo "[3/6] Verifying failures in isolation (serial)..."
 python scripts/transformers_verify.py \
     ${WORK_DIR}/classified.json \
     --out ${WORK_DIR}/verified.json \
-    --test-source-dir tests/transformers/models/${MODEL} \
-    --workers 4 \
+    --test-source-dir /root/.cache/torch_fl/hf-tests \
+    --transformers-version "$(python3 -c 'import transformers; print(transformers.__version__)')" \
+    --workers 1 \
     --timeout 120 \
     || {
         echo ""
@@ -148,22 +149,19 @@ cat ${WORK_DIR}/preview.md
 echo ""
 echo "======================================================================="
 
-# Step 6: File issues (automatic)
+# Step 6: Stop for explicit authorization
 echo ""
-echo "[6/6] Filing issues to GitHub..."
-echo "  Repo: ${REPO}"
-echo "  Count: ${NEW_COUNT} issues"
+echo "[6/6] Issue previews are ready for human review."
+echo "No GitHub writes were performed."
 echo ""
-
-python scripts/transformers_file_issues.py \
-    ${WORK_DIR}/new.json \
-    --approve-all \
-    --repo ${REPO} \
-    --issue-bodies-dir ${WORK_DIR}/issues
-
+echo "File only explicitly approved fingerprints, for example:"
+echo "  python scripts/transformers_file_issues.py ${WORK_DIR}/new.json \\"
+echo "      --approve <fingerprint> [<fingerprint> ...] \\"
+echo "      --repo ${REPO} \\"
+echo "      --issue-bodies-dir ${WORK_DIR}/issues"
 echo ""
 echo "======================================================================="
-echo "✓ All Done!"
+echo "✓ Measurement and preview complete"
 echo "======================================================================="
 echo "Results saved in: ${WORK_DIR}"
 echo ""
@@ -171,9 +169,7 @@ echo "Files:"
 echo "  - test-results.json   (raw test output)"
 echo "  - classified.json     (triaged findings)"
 echo "  - verified.json       (isolated verification)"
-echo "  - new.json            (deduplicated new issues)"
+echo "  - new.json            (deduplicated new findings)"
 echo "  - preview.md          (issue preview)"
 echo "  - issues/*.md         (individual issue bodies)"
-echo ""
-echo "✓ ${NEW_COUNT} issues filed to ${REPO}"
 echo "======================================================================="

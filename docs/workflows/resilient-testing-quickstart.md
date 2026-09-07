@@ -64,7 +64,7 @@ python scripts/transformers_verify.py \
     /tmp/${MODEL}-classified.json \
     --out /tmp/${MODEL}-verified.json \
     --test-source-dir tests/transformers/models/${MODEL} \
-    --workers 4
+    --workers 1
 
 # Step 4: Deduplicate
 python scripts/transformers_deduplicate.py \
@@ -86,7 +86,7 @@ python scripts/transformers_preview_issues.py \
 cat /tmp/${MODEL}-preview.md
 python scripts/transformers_file_issues.py \
     /tmp/${MODEL}-new.json \
-    --approve-all \
+    --approve <explicitly-approved-fingerprint> \
     --repo flagos-ai/Torch-FL
 ```
 
@@ -228,7 +228,7 @@ gh auth status
 # 测试dry-run
 python scripts/transformers_file_issues.py \
     /tmp/bert-new.json \
-    --approve-all \
+    --approve <explicitly-approved-fingerprint> \
     --dry-run \
     --repo flagos-ai/Torch-FL
 ```

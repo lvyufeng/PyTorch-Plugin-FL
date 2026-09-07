@@ -5,14 +5,14 @@ Transformers Issue Filing Tool
 File GitHub issues for approved findings.
 
 Usage:
-    # File all issues
-    python scripts/transformers_file_issues.py /tmp/qwen3-new.json --approve-all --repo flagos-ai/Torch-FL
-
-    # File specific issues by fingerprint
-    python scripts/transformers_file_issues.py /tmp/qwen3-new.json --approve a1b2c3d4e5f6 b2c3d4e5f6g7 --repo flagos-ai/Torch-FL
+    # File specific issues after the user approves their fingerprints
+    python scripts/transformers_file_issues.py /tmp/qwen3-new.json \
+        --approve a1b2c3d4e5f6 b2c3d4e5f6a7 \
+        --repo flagos-ai/Torch-FL
 
     # Dry run (don't actually file)
-    python scripts/transformers_file_issues.py /tmp/qwen3-new.json --approve-all --dry-run
+    python scripts/transformers_file_issues.py /tmp/qwen3-new.json \
+        --approve a1b2c3d4e5f6 --dry-run
 """
 
 import argparse
@@ -101,7 +101,11 @@ def get_issue_labels(finding: Dict) -> List[str]:
     failure_class = finding["class"]
     if failure_class == "CRASH":
         labels.extend(["bug", "P0"])
-    elif failure_class in ("OP_UNSUPPORTED", "FEATURE_UNSUPPORTED"):
+    elif failure_class in (
+        "OP_UNSUPPORTED",
+        "OP_CPU_FALLBACK",
+        "FEATURE_UNSUPPORTED",
+    ):
         labels.append("enhancement")
     elif failure_class == "PRECISION":
         labels.append("bug")
@@ -177,9 +181,6 @@ def main():
 
     # Approval options
     approval = parser.add_mutually_exclusive_group(required=True)
-    approval.add_argument(
-        "--approve-all", action="store_true", help="File all findings"
-    )
     approval.add_argument("--approve", nargs="+", help="File specific fingerprints")
 
     # Other options
@@ -211,19 +212,37 @@ def main():
     findings = findings_json["findings"]
 
     # Determine which findings to file
-    if args.approve_all:
-        to_file = findings
-        print(f"Filing all {len(to_file)} findings")
-    else:
-        approved_fps = set(args.approve)
-        to_file = [f for f in findings if f["fingerprint"] in approved_fps]
-        print(f"Filing {len(to_file)} approved findings")
+    approved_fps = set(args.approve)
+    to_file = [f for f in findings if f["fingerprint"] in approved_fps]
+    print(f"Filing {len(to_file)} explicitly approved findings")
 
-        # Warn about unknown fingerprints
-        found_fps = {f["fingerprint"] for f in to_file}
-        unknown = approved_fps - found_fps
-        if unknown:
-            print(f"Warning: Unknown fingerprints: {unknown}")
+    # Warn about unknown fingerprints
+    found_fps = {f["fingerprint"] for f in to_file}
+    unknown = approved_fps - found_fps
+    if unknown:
+        print(f"Warning: Unknown fingerprints: {unknown}")
+
+    non_confirmed = [f for f in to_file if f.get("verdict") != "CONFIRMED"]
+    if non_confirmed:
+        subjects = ", ".join(f["subject"] for f in non_confirmed)
+        raise ValueError("Only CONFIRMED findings may be filed; blocked: " + subjects)
+
+    incomplete_bodies = []
+    for finding in to_file:
+        body_file = args.issue_bodies_dir / f"issue-{finding['fingerprint']}.md"
+        if not body_file.exists():
+            continue
+        body_text = body_file.read_text()
+        if (
+            "Fill in before filing" in body_text
+            or "- [ ] Human reviewer has completed" in body_text
+        ):
+            incomplete_bodies.append(str(body_file))
+    if incomplete_bodies:
+        raise ValueError(
+            "Issue drafts still contain mandatory review placeholders: "
+            + ", ".join(incomplete_bodies)
+        )
 
     if not to_file:
         print("No findings to file.")
@@ -273,8 +292,13 @@ def main():
         # Reconstruct title
         model = finding["models"][0] if finding["models"] else "unknown"
         title = f"[AI][{chip_match}] {model}: {subject}"
-        if finding["class"] == "OP_UNSUPPORTED":
-            title += f" not supported (transformers {tf_version})"
+        if finding["class"] in ("OP_UNSUPPORTED", "OP_CPU_FALLBACK"):
+            action = (
+                " uses CPU fallback"
+                if finding["class"] == "OP_CPU_FALLBACK"
+                else " not supported"
+            )
+            title += f"{action} (transformers {tf_version})"
         elif finding["class"] == "CRASH":
             title += f" crash (transformers {tf_version})"
         else:

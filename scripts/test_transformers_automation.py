@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Quick smoke test for transformers automation pipeline.
+Quick smoke test for the report-only Transformers automation pipeline.
 
-Creates a minimal test case and runs through all 5 tools to verify basic functionality.
+Creates a minimal test case and runs through triage, deduplication, and preview
+generation. GitHub filing is deliberately excluded because generated drafts require
+human root-cause completion and explicit authorization.
 """
 
 import json
@@ -27,14 +29,8 @@ def create_test_json():
                 "duration": 1.2,
                 "detail": "NotImplementedError: aten::scaled_dot_product_attention not implemented for flagos device",
             },
-            {
-                "nodeid": "tests/transformers/models/qwen3/test_modeling_qwen3.py::Qwen3Test::test_forward",
-                "status": "FAIL",
-                "duration": 0.8,
-                "detail": "RuntimeError: Device context poisoned by previous test",
-            },
         ],
-        "summary": {"total": 3, "passed": 1, "failed": 2},
+        "summary": {"total": 2, "passed": 1, "failed": 1},
     }
 
 
@@ -44,9 +40,7 @@ def run_tool(tool_name, args):
     print(f"\nRunning: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, check=True
-        )
+        subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
         print(f"✅ {tool_name} succeeded")
         return True
     except subprocess.CalledProcessError as e:
@@ -73,7 +67,7 @@ def main():
 
         print(f"\nCreated test input: {test_json}")
 
-        # Define pipeline (skip verify since it needs real test files)
+        # Define the report-only pipeline (verify needs real test files).
         pipeline = [
             (
                 "transformers_triage",
@@ -97,7 +91,9 @@ def main():
             (
                 "transformers_deduplicate",
                 [
-                    str(tmpdir / "classified.json"),  # Use classified instead of verified
+                    str(
+                        tmpdir / "classified.json"
+                    ),  # Use classified instead of verified
                     "--out",
                     str(tmpdir / "new.json"),
                     "--coverage-file",
@@ -121,18 +117,6 @@ def main():
                     str(tmpdir / "issues"),
                     "--out",
                     str(tmpdir / "preview.md"),
-                ],
-            ),
-            (
-                "transformers_file_issues",
-                [
-                    str(tmpdir / "new.json"),
-                    "--approve-all",
-                    "--dry-run",
-                    "--repo",
-                    "flagos-ai/Torch-FL",
-                    "--issue-bodies-dir",
-                    str(tmpdir / "issues"),
                 ],
             ),
         ]

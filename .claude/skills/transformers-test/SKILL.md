@@ -2,9 +2,10 @@
 name: transformers-test
 description: >
   Run HuggingFace transformers tests on custom chips with automatic triage,
-  verification, deduplication, and GitHub issue filing. Supports resilient mode
-  (crash recovery), manual/automatic pipelines, and weak model safety mode.
-  Use for coverage measurement, automated issue filing, or manual investigation.
+  verification, deduplication, and GitHub issue preview generation. Supports
+  resilient mode (crash recovery), manual/automatic pipelines, CPU fallback
+  measurement, and weak model safety mode. Use for coverage measurement,
+  authorized issue filing, or manual investigation.
 ---
 
 # transformers-test (torch_fl)
@@ -72,7 +73,7 @@ run(command)
 
 ### What It Does
 
-Run tests → triage → verify → deduplicate → file issues (fully automatic)
+Run tests → measure CPU fallback → triage → verify → deduplicate → preview issues. GitHub writes require explicit per-finding approval.
 
 **Time**: 15-90 minutes depending on model
 
@@ -82,7 +83,7 @@ Run tests → triage → verify → deduplicate → file issues (fully automatic
 
 | Mode | Command | Use Case | Model Capability |
 |------|---------|----------|------------------|
-| **Automated** | `transformers_auto_sweep.sh` | End-to-end automation | Strong models (Opus) |
+| **Automated** | `transformers_auto_sweep.sh` | Test through issue preview; no GitHub writes | Strong models (Opus) |
 | **Safe** | `safe_transformers_wrapper.py` | Protected automation | Weak models (Qwen-27B) |
 | **Batch** | `transformers_batch_sweep.sh` | Test multiple models | Any |
 | **Manual** | Step-by-step commands | Investigation, control | Strong models |
@@ -454,7 +455,7 @@ If the requested model does not exist in the pinned `transformers`, record
 `NOT_IN_VERSION`. That is neither a pass nor a failure, and counting it either
 way corrupts the platform's rate.
 
-## Step 4 — isolate every model in a subprocess
+## Step 4 — isolate every model and every verification run
 
 Run each model in its own subprocess with a timeout, even in single-model mode.
 Accelerator faults are not contained: one illegal memory access poisons the
@@ -470,17 +471,37 @@ illegal memory access | device-side assert | unspecified launch failure
 misaligned address | vmfault | acceleratorerror
 ```
 
+For resilient batches and finding verification, pass only the selected nodeids
+to pytest. Never pass both a bare architecture directory and selected nodeids:
+pytest unions those selectors and silently runs the entire directory. Verify the
+result says `collected == 1` (or exactly the requested batch size) before treating
+it as isolation evidence.
+
+Verification defaults to one subprocess at a time. Multiple subprocesses may
+still contend for the same accelerator and memory pool, so parallel verification
+is allowed only when every worker is pinned to a genuinely isolated device. A
+runner/setup `ERROR` is `INCONCLUSIVE`, never `CONFIRMED`; fix the verification
+environment and rerun it.
+
 Write results incrementally so an interrupted sweep resumes instead of
 restarting, and keep raw stdout/stderr per model for auditing.
 
 ## Step 5 — classify the failure and name the root cause
 
-Every failure must land in exactly one class. The class selects the issue label
-and decides whether the finding is actionable:
+Enable `FLAGOS_LOG_FALLBACK=1` for the measurement subprocess. A passing test
+that emits `[flagos cpu_fallback] aten::<op>` is not accelerator coverage: record
+one `OP_CPU_FALLBACK` finding per unique operator. Unless the user has explicitly
+allowed host fallback for the measured platform, treat each as a missing device
+implementation eligible for an issue after deduplication and authorization. Do
+not hide it merely because the model assertion passed.
+
+Every failure or measured fallback must land in exactly one class. The class
+selects the issue label and decides whether the finding is actionable:
 
 | Class | Signal | Labels |
 |---|---|---|
 | `OP_UNSUPPORTED` | `NOT_SUPPORTED`, `backend not registered`, `could not run 'aten::…'` | `enhancement`, `ai-generated` |
+| `OP_CPU_FALLBACK` | `[flagos cpu_fallback] aten::<op>` during a model test | `enhancement`, `ai-generated` |
 | `FEATURE_UNSUPPORTED` | non-operator runtime or feature gap | `enhancement`, `ai-generated` |
 | `PRECISION` | ran, but disagrees with the CPU baseline | `bug`, `ai-generated` |
 | `CRASH` | segfault, poison, or timeout | `bug`, `ai-generated` |
@@ -495,7 +516,7 @@ Confirm the current set before filing rather than trusting this list:
 gh api repos/flagos-ai/Torch-FL/labels --paginate --jq '.[].name'
 ```
 
-For `OP_UNSUPPORTED` and `PRECISION`, re-run the failing layer under
+For `OP_UNSUPPORTED`, `OP_CPU_FALLBACK`, and `PRECISION`, re-run the failing layer under
 `TorchDispatchMode` and capture the aten calls, then put the specific operator
 in the finding. Without this attribution the report only says a model failed,
 which a maintainer cannot act on. `tests/manual/op_called_summary.py` is the
@@ -554,7 +575,9 @@ Two different fingerprints are in play, and confusing them is the usual mistake:
   node ID, so it identifies one test result and is deliberately unsuitable for
   dedup;
 - the **cause fingerprint** below, which drops model and node ID so that the same
-  defect reached from ten models collapses to one value.
+  defect reached from ten models collapses to one value. It must include the
+  responsible component/backend; otherwise identical vendor wording can merge
+  unrelated implementations.
 
 Compute the cause fingerprint from the finding you established in Step 6, not
 from raw pytest output:
@@ -707,10 +730,14 @@ comparisons.
 
 Every GitHub write is a separate outward-facing action. Perform only the action
 that the user explicitly requests in the current session, and only for the
-named, verified finding:
+named, verified finding. Automated and safe-wrapper modes stop after generating
+issue previews; they never invoke `transformers_file_issues.py` themselves:
 
-- "file/open/create an issue" authorizes creating the specified new issue; it
-  does not authorize commenting on or reopening an existing issue;
+- "file/open/create issues" may authorize every named verified cause in the
+  immediately preceding candidate list; preserve that mapping by filing the
+  corresponding fingerprints only. A generic approval is not permission to add
+  newly discovered causes later in the session, and it does not authorize
+  commenting on or reopening an existing issue;
 - "comment on issue #N" authorizes one comment on that issue; it does not
   authorize reopening it;
 - "reopen issue #N" authorizes changing that issue's state; add a comment only
@@ -776,7 +803,7 @@ Before opening a PR:
 - the `transformers` version and torch_fl commit are recorded with every result;
 - CPU baselines were validated before any device comparison;
 - poisoned runs are one finding per model, not per layer;
-- every `OP_UNSUPPORTED` and `PRECISION` finding names an operator;
+- every `OP_UNSUPPORTED`, `OP_CPU_FALLBACK`, and `PRECISION` finding names an operator;
 - every finding row carries its cause fingerprint;
 - `NOT_IN_VERSION`, `UNTESTED`, and CUDA-only skips are excluded from failures;
 - fingerprints were searched in issue bodies and comments, with a semantic

@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
-"""
-Transformers Test Verification Tool
-
-Isolate and rerun each finding's representative test in a fresh subprocess
-to distinguish real failures from collateral damage due to device poisoning.
-
-Usage:
-    python scripts/transformers_verify.py /tmp/qwen3-findings.json --out /tmp/qwen3-verified.json
-
-Features:
-- Runs tests in parallel (default: CPU count)
-- Fresh subprocess per test (no contamination)
-- Timeout protection
-- Records isolation outcome
-
-Output schema adds to each finding:
-    {
-      "isolation_status": "FAIL",  # FAIL/PASS/SKIP/TIMEOUT/ERROR
-      "isolation_detail": "...",
-      "isolation_duration_s": 3.2,
-      "isolation_command": "pytest ...",
-      "verdict": "CONFIRMED"  # CONFIRMED/COLLATERAL
-    }
-"""
+"""Verify Transformers findings in fresh pytest subprocesses."""
 
 import argparse
 import json
+import os
 import subprocess
+import sys
+import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Optional
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEVICE_SPEC = REPO_ROOT / "tests" / "manual" / "hf_device_spec.py"
+
+
+def isolated_env(test_source_dir: Path, workdir: Path) -> dict[str, str]:
+    """Build the same PrivateUse1 test environment as the official runner."""
+    env = dict(os.environ)
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    env["FLAGOS_LOG_FALLBACK"] = "1"
+    env.pop("TRANSFORMERS_TEST_DEVICE", None)
+    env["TRANSFORMERS_TEST_DEVICE_SPEC"] = "hf_device_spec.py"
+    entries = [
+        entry
+        for entry in env.get("PYTHONPATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() != REPO_ROOT
+    ]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(workdir), str(test_source_dir), str(test_source_dir / "utils"), *entries]
+    )
+    return env
 
 
 def run_isolated_test(
@@ -38,104 +38,88 @@ def run_isolated_test(
     test_source_dir: Path,
     timeout: int = 120,
 ) -> Dict:
-    """
-    Run a single test in isolation.
-
-    Args:
-        nodeid: pytest nodeid (e.g., "tests/models/qwen3/test_modeling_qwen3.py::Qwen3ModelTest::test_save_load")
-        test_source_dir: root directory containing the test
-        timeout: test timeout in seconds
-
-    Returns:
-        {
-            "status": "FAIL"|"PASS"|"SKIP"|"TIMEOUT"|"ERROR",
-            "detail": "...",
-            "duration_s": 3.2,
-            "command": "pytest ...",
-            "returncode": 0,
-        }
-    """
-    # Build pytest command
+    """Run exactly one nodeid in a fresh subprocess."""
+    normalized_nodeid = nodeid.removeprefix(str(test_source_dir) + os.sep)
     cmd = [
+        sys.executable,
+        "-m",
         "pytest",
-        str(test_source_dir / nodeid),
-        "-xvs",  # stop on first failure, verbose, no capture
-        f"--timeout={timeout}",
-        "--tb=short",  # short traceback
+        "-c",
+        str(test_source_dir / "pyproject.toml"),
+        "--rootdir",
+        str(test_source_dir),
+        normalized_nodeid,
+        "-q",
+        "-p",
+        "no:warnings",
+        "--tb=short",
     ]
-
     command_str = " ".join(cmd)
     started = time.time()
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-            + 10,  # subprocess timeout slightly longer than pytest timeout
-            cwd=test_source_dir,
-        )
-        duration = time.time() - started
+    with tempfile.TemporaryDirectory(prefix="hf-verify-") as tmp:
+        workdir = Path(tmp)
+        try:
+            (workdir / DEVICE_SPEC.name).write_text(DEVICE_SPEC.read_text())
+            (workdir / "tests").symlink_to(
+                test_source_dir / "tests", target_is_directory=True
+            )
+            (workdir / "src").symlink_to(
+                test_source_dir / "src", target_is_directory=True
+            )
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=workdir,
+                env=isolated_env(test_source_dir, workdir),
+            )
+        except subprocess.TimeoutExpired:
+            duration = time.time() - started
+            return {
+                "status": "TIMEOUT",
+                "detail": f"Test exceeded {timeout}s timeout",
+                "duration_s": round(duration, 1),
+                "command": command_str,
+                "returncode": None,
+            }
+        except (OSError, ValueError) as exc:
+            duration = time.time() - started
+            return {
+                "status": "ERROR",
+                "detail": f"Could not run isolated test: {exc}",
+                "duration_s": round(duration, 1),
+                "command": command_str,
+                "returncode": None,
+            }
 
-        # Parse pytest outcome from output
-        combined = result.stdout + result.stderr
+    duration = time.time() - started
+    combined = result.stdout + result.stderr
+    if result.returncode == 0:
+        status = "SKIP" if " skipped" in combined.lower() else "PASS"
+    elif result.returncode == 1:
+        status = "FAIL"
+    else:
+        status = "ERROR"
 
-        if "PASSED" in combined or result.returncode == 0:
-            status = "PASS"
-        elif "SKIPPED" in combined:
-            status = "SKIP"
-        elif "FAILED" in combined or result.returncode != 0:
-            status = "FAIL"
-        else:
-            status = "ERROR"
-
-        return {
-            "status": status,
-            "detail": combined[-2000:],  # last 2000 chars
-            "duration_s": round(duration, 1),
-            "command": command_str,
-            "returncode": result.returncode,
-        }
-
-    except subprocess.TimeoutExpired:
-        duration = time.time() - started
-        return {
-            "status": "TIMEOUT",
-            "detail": f"Test exceeded {timeout}s timeout",
-            "duration_s": round(duration, 1),
-            "command": command_str,
-            "returncode": -1,
-        }
-
-    except Exception as e:
-        duration = time.time() - started
-        return {
-            "status": "ERROR",
-            "detail": f"Exception running test: {e}",
-            "duration_s": round(duration, 1),
-            "command": command_str,
-            "returncode": -1,
-        }
+    return {
+        "status": status,
+        "detail": combined[-8000:],
+        "duration_s": round(duration, 1),
+        "command": command_str,
+        "returncode": result.returncode,
+    }
 
 
 def determine_verdict(isolation_status: str, original_class: str) -> str:
-    """
-    Determine if finding is CONFIRMED or COLLATERAL based on isolation outcome.
-
-    Rules:
-    - FAIL in isolation → CONFIRMED (real defect)
-    - TIMEOUT in isolation → CONFIRMED (timeout is a defect)
-    - PASS in isolation → COLLATERAL (suite failure but isolated pass = device poisoning side effect)
-    - SKIP in isolation → COLLATERAL (not actually exercising the code path)
-    - ERROR in isolation → CONFIRMED (assume real until proven otherwise)
-    """
-    if isolation_status in ("FAIL", "TIMEOUT", "ERROR"):
+    """Map an isolation outcome to a filing verdict."""
+    del original_class
+    if isolation_status in ("FAIL", "TIMEOUT"):
         return "CONFIRMED"
-    elif isolation_status in ("PASS", "SKIP"):
+    if isolation_status in ("PASS", "SKIP"):
         return "COLLATERAL"
-    else:
-        return "UNKNOWN"
+    return "INCONCLUSIVE"
 
 
 def verify_findings(
@@ -144,89 +128,84 @@ def verify_findings(
     timeout: int,
     max_workers: Optional[int],
 ) -> Dict:
-    """
-    Verify all findings by running isolated tests in parallel.
-
-    Args:
-        findings_json: output from transformers_triage.py
-        test_source_dir: root directory containing transformers tests
-        timeout: per-test timeout
-        max_workers: parallelism (None = CPU count)
-
-    Returns:
-        findings_json with isolation results added
-    """
+    """Verify findings serially unless parallelism was explicitly requested."""
     findings = findings_json["findings"]
-    print(f"Verifying {len(findings)} findings with {max_workers or 'auto'} workers")
-
-    # Prepare tasks
-    tasks = []
-    for i, finding in enumerate(findings):
-        nodeid = finding["representative_nodeid"]
-        tasks.append((i, nodeid, finding))
-
-    # Run in parallel
-    results = [None] * len(tasks)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                run_isolated_test,
-                nodeid,
-                test_source_dir,
-                timeout,
-            ): (i, finding)
-            for i, nodeid, finding in tasks
+    pending = [f for f in findings if f.get("verification_required", True)]
+    if not pending:
+        findings_json["summary"]["verified"] = {
+            "CONFIRMED": sum(f.get("verdict") == "CONFIRMED" for f in findings)
         }
+        return findings_json
+    workers = max_workers or 1
+    if workers != 1:
+        print(
+            "Error: parallel accelerator verification is not supported because "
+            "subprocesses may share one device context. Use --workers 1."
+        )
+        for finding in pending:
+            finding["isolation_status"] = "ERROR"
+            finding["isolation_detail"] = "parallel verification rejected"
+            finding["isolation_duration_s"] = 0
+            finding["isolation_command"] = ""
+            finding["verdict"] = "INCONCLUSIVE"
+        findings_json["summary"]["verified"] = {
+            "INCONCLUSIVE": len(pending),
+            "CONFIRMED": sum(f.get("verdict") == "CONFIRMED" for f in findings),
+        }
+        return findings_json
+    print(f"Verifying {len(pending)} findings serially")
 
-        for future in as_completed(futures):
-            i, finding = futures[future]
-            try:
-                isolation_result = future.result()
-                results[i] = isolation_result
-
-                # Print progress
-                verdict = determine_verdict(
-                    isolation_result["status"],
-                    finding["class"],
-                )
-                print(
-                    f"  [{i + 1}/{len(findings)}] {finding['class']} {finding['subject']}: "
-                    f"{isolation_result['status']} → {verdict}"
-                )
-
-            except Exception as e:
-                print(f"  [{i + 1}/{len(findings)}] ERROR: {e}")
-                results[i] = {
-                    "status": "ERROR",
-                    "detail": str(e),
-                    "duration_s": 0,
-                    "command": "",
-                    "returncode": -1,
-                }
-
-    # Merge results back into findings
-    for finding, isolation_result in zip(findings, results):
+    # Multiple pytest subprocesses can still share one accelerator context and
+    # memory pool, so verification remains serial until per-worker device pinning
+    # exists.
+    for index, finding in enumerate(pending, start=1):
+        isolation_result = run_isolated_test(
+            finding["representative_nodeid"], test_source_dir, timeout
+        )
         finding["isolation_status"] = isolation_result["status"]
         finding["isolation_detail"] = isolation_result["detail"]
         finding["isolation_duration_s"] = isolation_result["duration_s"]
         finding["isolation_command"] = isolation_result["command"]
         finding["verdict"] = determine_verdict(
-            isolation_result["status"],
-            finding["class"],
+            isolation_result["status"], finding["class"]
+        )
+        print(
+            f"  [{index}/{len(pending)}] {finding['class']} {finding['subject']}: "
+            f"{isolation_result['status']} → {finding['verdict']}"
         )
 
-    # Update summary
     verdict_counts = {}
     for finding in findings:
         verdict = finding["verdict"]
         verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
-
     findings_json["summary"]["verified"] = verdict_counts
-
     return findings_json
 
 
-def main():
+def version_key(path: Path) -> tuple[int, ...]:
+    """Return a numeric key for a transformers-X.Y.Z source directory."""
+    suffix = path.name.removeprefix("transformers-")
+    return tuple(int(part) for part in suffix.split(".") if part.isdigit())
+
+
+def resolve_test_source(root: Path, version: Optional[str]) -> Path:
+    """Resolve either an exact source tree or a versioned cache root."""
+    if (root / "tests" / "models").is_dir():
+        return root
+    if version:
+        selected = root / f"transformers-{version}"
+        if not selected.is_dir():
+            raise FileNotFoundError(
+                f"Transformers {version} source not found: {selected}"
+            )
+        return selected
+    version_dirs = [p for p in root.glob("transformers-*") if p.is_dir()]
+    if not version_dirs:
+        raise FileNotFoundError(f"No transformers-X.Y.Z directory found in {root}")
+    return max(version_dirs, key=version_key)
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify transformers test findings in isolation"
     )
@@ -240,73 +219,49 @@ def main():
         "--test-source-dir",
         type=Path,
         default=Path("/root/.cache/torch_fl/hf-tests"),
-        help="Root directory containing transformers test sources (default: HF cache)",
+        help="Exact Transformers source tree or its versioned cache root",
     )
     parser.add_argument(
-        "--timeout",
-        type=int,
-        default=120,
-        help="Per-test timeout in seconds (default: 120)",
+        "--transformers-version",
+        help="Select an exact transformers-X.Y.Z cache directory",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=120, help="Per-test timeout in seconds"
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=None,
-        help="Number of parallel workers (default: CPU count)",
+        default=1,
+        help="Reserved for isolated multi-device hosts; verification remains serial",
     )
     args = parser.parse_args()
 
     if not args.input.exists():
         raise FileNotFoundError(f"Input JSON not found: {args.input}")
-
-    # Find the test source directory
-    # transformers_hf_tests.py caches sources under /root/.cache/torch_fl/hf-tests/transformers-X.Y.Z/
-    # We need to find the specific version directory
     if not args.test_source_dir.exists():
         raise FileNotFoundError(
             f"Test source directory not found: {args.test_source_dir}\n"
-            f"Make sure transformers_hf_tests.py has been run and cached the test sources."
+            "Run transformers_hf_tests.py first to cache the official source."
         )
 
-    # Find the transformers version directory
-    version_dirs = list(args.test_source_dir.glob("transformers-*"))
-    if not version_dirs:
-        raise FileNotFoundError(
-            f"No transformers-X.Y.Z directory found in {args.test_source_dir}"
-        )
-
-    # Use the most recent (highest version)
-    test_source_dir = sorted(version_dirs)[-1]
+    test_source_dir = resolve_test_source(
+        args.test_source_dir, args.transformers_version
+    )
     print(f"Using test source: {test_source_dir}")
 
-    print(f"Reading {args.input}")
-    with open(args.input) as f:
-        findings_json = json.load(f)
-
-    print(f"\nVerifying {len(findings_json['findings'])} findings...")
-    result = verify_findings(
-        findings_json,
-        test_source_dir,
-        args.timeout,
-        args.workers,
-    )
+    with open(args.input) as file:
+        findings_json = json.load(file)
+    result = verify_findings(findings_json, test_source_dir, args.timeout, args.workers)
 
     print("\nVerification summary:")
     for verdict, count in result["summary"].get("verified", {}).items():
         print(f"  {verdict}: {count}")
-
-    confirmed = [f for f in result["findings"] if f["verdict"] == "CONFIRMED"]
-    collateral = [f for f in result["findings"] if f["verdict"] == "COLLATERAL"]
-    print(f"\nConfirmed: {len(confirmed)}")
-    print(f"Collateral: {len(collateral)}")
-
-    print(f"\nWriting {args.out}")
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(result, f, indent=2)
-
-    print("Done.")
+    with open(args.out, "w") as file:
+        json.dump(result, file, indent=2)
+    print(f"\nWriting {args.out}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

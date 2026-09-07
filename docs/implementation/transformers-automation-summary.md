@@ -27,7 +27,7 @@ test-results.json
     ↓
 [1. Triage] → classified.json
     ↓
-[2. Verify] → verified.json (parallel isolation)
+[2. Verify] → verified.json (serial isolation)
     ↓
 [3. Deduplicate] → new.json (baseline + GitHub check)
     ↓
@@ -41,7 +41,7 @@ test-results.json
 | Stage | Manual | Automated |
 |-------|--------|-----------|
 | Classification | 30 min | 5 sec |
-| Verification | 60 min | 5 min (parallel) |
+| Verification | 60 min | 5 min (serial) |
 | Deduplication | 20 min | 10 sec |
 | Issue writing | 10 min | 5 sec |
 | Filing | Manual | 30 sec |
@@ -79,7 +79,7 @@ def detect_crash(test_record, run_info):
 **Purpose**: Parallel isolation verification
 
 **Key features**:
-- ThreadPoolExecutor for parallel test execution
+- ThreadPoolExecutor for serial test execution
 - Subprocess isolation per test
 - Configurable timeout and workers
 - Separates REPRODUCED from COLLATERAL
@@ -91,7 +91,7 @@ with ThreadPoolExecutor(max_workers=4) as executor:
         executor.submit(run_isolated_test, nodeid, timeout): finding
         for finding in classified_findings
     }
-    # Tests run truly in parallel, no barrier
+    # Tests run serially to avoid cross-process accelerator interference
 ```
 
 **Performance**: 60 min → 5 min for typical model (12x speedup)
@@ -150,7 +150,7 @@ Automated classification via transformers_triage.py
 
 **Safety features**:
 - Dry-run prevents accidental filing
-- Requires explicit approval (--approve-all or --approve fp1 fp2)
+- Requires explicit approval (--approve <explicitly-approved-fingerprint> or --approve fp1 fp2)
 - Shows what would be filed before execution
 
 ### Cross-Platform Support
@@ -191,7 +191,7 @@ python scripts/transformers_deduplicate.py verified.json --out new.json ...
 python scripts/transformers_preview_issues.py new.json --chip MUSA ...
 
 # Step 5
-python scripts/transformers_file_issues.py new.json --approve-all
+python scripts/transformers_file_issues.py new.json --approve <explicitly-approved-fingerprint>
 ```
 
 Even weak models can follow this linear sequence.
@@ -235,11 +235,12 @@ $ python scripts/test_transformers_automation.py
 - Works across models (qwen3 and llama3 hitting same SDPA issue share fingerprint)
 - Stable across runs (same fingerprint even if test count changes)
 
-### Why parallel verification?
+### Why serial verification?
 
-- Biggest bottleneck in pipeline (60 min → 5 min)
-- Tests are independent (no shared state)
-- ThreadPoolExecutor with subprocess isolation = safe parallelism
+- Separate Python processes can still share one accelerator and memory pool.
+- Concurrent failures can contaminate results or cause resource interference.
+- Serial fresh-process reruns are slower but provide defensible isolation evidence.
+- Parallel verification is deferred until the tool can pin each worker to a genuinely isolated device.
 
 ### Why skip GitHub search option?
 
@@ -264,12 +265,12 @@ python scripts/transformers_triage.py \
   ~/test-results/${MODEL}.json \
   --out /tmp/${MODEL}-classified.json
 
-# 3. Verify (parallel)
+# 3. Verify (serial)
 python scripts/transformers_verify.py \
   /tmp/${MODEL}-classified.json \
   --out /tmp/${MODEL}-verified.json \
   --test-source-dir tests/transformers/models/${MODEL} \
-  --workers 4
+  --workers 1
 
 # 4. Deduplicate
 python scripts/transformers_deduplicate.py \
@@ -292,7 +293,7 @@ cat /tmp/${MODEL}-preview.md
 # 7. File all
 python scripts/transformers_file_issues.py \
   /tmp/${MODEL}-new.json \
-  --approve-all \
+  --approve <explicitly-approved-fingerprint> \
   --repo flagos-ai/Torch-FL
 ```
 
@@ -301,7 +302,7 @@ python scripts/transformers_file_issues.py \
 ```bash
 python scripts/transformers_file_issues.py \
   /tmp/qwen3-new.json \
-  --approve-all \
+  --approve <explicitly-approved-fingerprint> \
   --dry-run
 ```
 
@@ -347,7 +348,7 @@ Tested with actual qwen3 test results (from PR #247):
 3. Add progress bars for long-running stages
 
 ### Medium-term
-1. Integration with CI/CD for automatic issue filing
+1. Integration with CI/CD for issue preview generation
 2. Historical trend analysis (issue rate over time)
 3. Smart retry for transient failures
 

@@ -110,6 +110,7 @@ STATUSES = (
     "SKIP_OTHER",
     "ENVIRONMENT_ERROR",
     "COLLECT_ERROR",
+    "BATCH_CRASHED",
 )
 
 MARK = "@@HFTEST@@"
@@ -122,12 +123,29 @@ MARK = "@@HFTEST@@"
 PLUGIN = r"""
 import json
 import os
+import re
+
+
+FALLBACK_RE = re.compile(r"\[flagos cpu_fallback\]\s+(\S+)")
 
 
 def _text(value):
     if value is None:
         return None
-    return str(value)[:8000]
+    text = str(value)
+    if len(text) <= 8000:
+        return text
+    return text[:4000] + "\n... <truncated> ...\n" + text[-4000:]
+
+
+def _fallback_ops(sections):
+    return sorted(
+        {
+            op
+            for _, content in sections
+            for op in FALLBACK_RE.findall(str(content))
+        }
+    )
 
 
 class Recorder:
@@ -145,6 +163,7 @@ class Recorder:
 
     def pytest_runtest_logreport(self, report):
         if report.when == "call" or report.outcome == "failed" or report.skipped:
+            sections = list(report.sections[:6])
             self.add(
                 {
                     "kind": "test",
@@ -155,8 +174,9 @@ class Recorder:
                     "wasxfail": getattr(report, "wasxfail", None) is not None,
                     "longrepr": _text(report.longrepr),
                     "sections": [
-                        [name, _text(content)] for name, content in report.sections[:6]
+                        [name, _text(content)] for name, content in sections
                     ],
+                    "cpu_fallback_ops": _fallback_ops(sections),
                 }
             )
 
@@ -270,7 +290,11 @@ def reduce_records(records: list[dict]) -> dict:
                 "duration_s": 0.0,
                 "detail": None,
                 "output": None,
+                "cpu_fallback_ops": [],
             },
+        )
+        entry["cpu_fallback_ops"] = sorted(
+            set(entry["cpu_fallback_ops"]) | set(record.get("cpu_fallback_ops") or [])
         )
         duration = record.get("duration")
         if isinstance(duration, (int, float)):
@@ -316,12 +340,23 @@ def reduce_records(records: list[dict]) -> dict:
     }
 
 
+def fallback_ops(tests: list[dict]) -> list[str]:
+    """Return the unique operators that executed through CPU fallback."""
+    return sorted({op for test in tests for op in test.get("cpu_fallback_ops", [])})
+
+
 def summarize_statuses(tests: list[dict], collect_errors: list[dict]) -> dict:
     counts = {name: 0 for name in STATUSES}
     for test in tests:
-        counts[test["status"]] += 1
+        status = test["status"]
+        if status not in counts:
+            counts[status] = 0
+        counts[status] += 1
     for error in collect_errors:
-        counts[error["status"]] += 1
+        status = error["status"]
+        if status not in counts:
+            counts[status] = 0
+        counts[status] += 1
     return {name: value for name, value in counts.items() if value}
 
 
@@ -347,6 +382,8 @@ def verdict(result: dict) -> str:
         return "CRASH"
     if counts.get("COLLECT_ERROR"):
         return "COLLECT_ERROR"
+    if counts.get("BATCH_CRASHED"):
+        return "CRASH"
     if counts.get("FAIL") or counts.get("ERROR"):
         return "FAIL"
     executed = counts.get("PASS", 0) + counts.get("XFAIL", 0) + counts.get("XPASS", 0)
@@ -459,6 +496,7 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
     """Build the environment HuggingFace's device injection contract needs."""
     env = dict(os.environ)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    env["FLAGOS_LOG_FALLBACK"] = "1"
     # Custom PrivateUse1 names are registered by the spec. Transformers validates
     # TRANSFORMERS_TEST_DEVICE before importing that spec, so setting it to
     # ``flagos`` would fail at torch.device() validation.
@@ -486,7 +524,11 @@ def child_env(source: Path, device: str, report: Path, offline: bool) -> dict:
 
 
 def pytest_command(
-    target: Path, marks: str, extra: list[str], collect_only: bool
+    target: Path,
+    marks: str,
+    extra: list[str],
+    collect_only: bool,
+    include_target: bool = True,
 ) -> list[str]:
     """Build the pytest invocation.
 
@@ -494,6 +536,11 @@ def pytest_command(
     so what runs is what ``pytest tests/models/<module>/`` runs upstream. Making
     a platform look better by deselecting upstream tests would defeat the point
     of measuring coverage.
+
+    ``include_target`` must be ``False`` when ``extra`` already carries specific
+    nodeids (e.g. batch/isolation runs): pytest treats a bare directory arg as
+    "collect everything under here" regardless of any nodeids also passed, so
+    appending both silently reruns the whole suite instead of the selection.
     """
     command = [sys.executable, "-m", "pytest"]
     if marks:
@@ -501,7 +548,8 @@ def pytest_command(
     if collect_only:
         command.append("--collect-only")
     command += extra
-    command.append(str(target))
+    if include_target:
+        command.append(str(target))
     return command
 
 
@@ -601,6 +649,7 @@ def run_test_batch(
             ]
             + batch_nodeids,  # Add nodeids to select specific tests
             collect_only=False,
+            include_target=False,
         )
 
         proc = subprocess.run(
@@ -615,7 +664,7 @@ def run_test_batch(
         reduced = reduce_records(read_report(report))
         crashed = pytest_process_crashed(proc.returncode)
 
-        return {
+        result = {
             "tests": reduced["tests"],
             "collect_errors": reduced["collect_errors"],
             "collected": reduced["collected"],
@@ -624,6 +673,8 @@ def run_test_batch(
             "stdout_tail": proc.stdout.strip()[-2000:] or None,
             "stderr_tail": proc.stderr.strip()[-2000:] or None,
         }
+        result["cpu_fallback_ops"] = fallback_ops(result["tests"])
+        return result
 
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
@@ -636,7 +687,7 @@ def run_test_batch(
         # Try to read whatever got written before timeout
         reduced = reduce_records(read_report(report))
 
-        return {
+        result = {
             "tests": reduced["tests"],
             "collect_errors": reduced["collect_errors"],
             "collected": reduced["collected"],
@@ -646,6 +697,8 @@ def run_test_batch(
             "stdout_tail": stdout.strip()[-2000:] or None,
             "stderr_tail": stderr.strip()[-2000:] or None,
         }
+        result["cpu_fallback_ops"] = fallback_ops(result["tests"])
+        return result
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -722,17 +775,26 @@ def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> d
                     }
                 )
 
-                # Mark tests in crashed batch
-                for nodeid in batch:
-                    all_tests.append(
-                        {
-                            "nodeid": nodeid,
-                            "status": "BATCH_CRASHED",
-                            "detail": f"Batch {batch_name} crashed or timed out",
-                        }
-                    )
+                reported_nodeids = {test["nodeid"] for test in batch_result["tests"]}
+                all_tests.extend(batch_result["tests"])
+                all_collect_errors.extend(batch_result["collect_errors"])
 
-                # Try to reset device
+                # Keep completed per-test evidence from a crashed batch. Only
+                # nodeids with no report are unknown; marking the whole batch as
+                # crashed would overwrite real PASS/FAIL results.
+                for nodeid in batch:
+                    if nodeid not in reported_nodeids:
+                        all_tests.append(
+                            {
+                                "nodeid": nodeid,
+                                "status": "BATCH_CRASHED",
+                                "detail": f"Batch {batch_name} crashed or timed out before reporting this test",
+                                "cpu_fallback_ops": [],
+                            }
+                        )
+
+                # Try to release cached allocations. A poisoned accelerator
+                # context may require a process/driver reset; this is best effort.
                 reset_device_context(args.device)
 
             else:
@@ -757,6 +819,7 @@ def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> d
                         "nodeid": nodeid,
                         "status": "BATCH_CRASHED",
                         "detail": f"Batch {batch_name} exception: {e}",
+                        "cpu_fallback_ops": [],
                     }
                 )
 
@@ -779,6 +842,7 @@ def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> d
             "context_poison": poisoned,
             "batch_size": batch_size,
             "batch_timeout": batch_timeout,
+            "cpu_fallback_ops": fallback_ops(all_tests),
         },
         "tests": all_tests,
         "collect_errors": all_collect_errors,
@@ -790,8 +854,9 @@ def run_tests_resilient(model: str, source: Path, args: argparse.Namespace) -> d
 
 def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
     """Run one architecture's official tests in an isolated subprocess."""
-    # Check if resilient mode is enabled
-    if args.resilient:
+    # Check if resilient mode is enabled. getattr keeps helper-level callers
+    # compatible with a minimal argparse namespace in unit tests and scripts.
+    if getattr(args, "resilient", False):
         return run_tests_resilient(model, source, args)
 
     target = test_dir(source, model)
@@ -885,6 +950,7 @@ def run_tests(model: str, source: Path, args: argparse.Namespace) -> dict:
             "workdir": str(workdir),
             "stdout_tail": stdout.strip()[-4000:] or None,
             "stderr_tail": stderr.strip()[-4000:] or None,
+            "cpu_fallback_ops": fallback_ops(reduced["tests"]),
         },
         "tests": reduced["tests"],
         "collect_errors": reduced["collect_errors"],
@@ -1029,7 +1095,11 @@ def summarize(result: dict) -> str:
     if run.get("context_poison"):
         lines.append("WARNING    device context was poisoned; later tests are void")
     if run.get("timed_out"):
-        lines.append(f"WARNING    timed out; partial results from {run['report']}")
+        lines.append(f"WARNING    timed out; partial results from {run.get('report')}")
+    if run.get("cpu_fallback_ops"):
+        lines.append(
+            "WARNING    CPU fallback operators: " + ", ".join(run["cpu_fallback_ops"])
+        )
     counts = result["summary"]
     lines.append("")
     lines.append(

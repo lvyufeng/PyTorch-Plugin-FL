@@ -25,7 +25,7 @@ python scripts/transformers_verify.py \
   /tmp/${MODEL}-classified.json \
   --output /tmp/${MODEL}-verified.json \
   --test-source-dir tests/transformers/models/${MODEL} \
-  --max-workers 4
+  --workers 1
 
 # 3. Deduplicate
 python scripts/transformers_deduplicate.py \
@@ -46,7 +46,7 @@ python scripts/transformers_preview_issues.py \
 cat /tmp/${MODEL}-preview.md
 python scripts/transformers_file_issues.py \
   /tmp/${MODEL}-new.json \
-  --approve-all \
+  --approve <explicitly-approved-fingerprint> \
   --repo flagos-ai/Torch-FL
 ```
 
@@ -100,7 +100,7 @@ python scripts/transformers_verify.py \
   /tmp/qwen3-classified.json \
   --output /tmp/qwen3-verified.json \
   --test-source-dir tests/transformers/models/qwen3 \
-  --max-workers 4 \
+  --workers 1 \
   --timeout 60
 ```
 
@@ -188,7 +188,7 @@ python scripts/transformers_preview_issues.py \
 ```bash
 python scripts/transformers_file_issues.py \
   /tmp/qwen3-new.json \
-  --approve-all \
+  --approve <explicitly-approved-fingerprint> \
   --repo flagos-ai/Torch-FL
 ```
 
@@ -204,7 +204,7 @@ python scripts/transformers_file_issues.py \
 ```bash
 python scripts/transformers_file_issues.py \
   /tmp/qwen3-new.json \
-  --approve-all \
+  --approve <explicitly-approved-fingerprint> \
   --dry-run
 ```
 
@@ -303,13 +303,13 @@ Adjust based on available CPU cores and memory:
 
 ```bash
 # Conservative (low memory)
-python scripts/transformers_verify.py ... --max-workers 2
+python scripts/transformers_verify.py ... --workers 1
 
 # Balanced (default)
-python scripts/transformers_verify.py ... --max-workers 4
+python scripts/transformers_verify.py ... --workers 1
 
 # Aggressive (high memory, many cores)
-python scripts/transformers_verify.py ... --max-workers 8
+python scripts/transformers_verify.py ... --workers 1
 ```
 
 ### Issue Filing Rate Limit

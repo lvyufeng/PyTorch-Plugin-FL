@@ -43,8 +43,13 @@ def generate_issue_title(
     subject = finding["subject"]
     failure_class = finding["class"]
 
-    if failure_class == "OP_UNSUPPORTED":
-        return f"[AI][{chip}] {model}: {subject} not supported (transformers {transformers_version})"
+    if failure_class in ("OP_UNSUPPORTED", "OP_CPU_FALLBACK"):
+        action = (
+            "uses CPU fallback"
+            if failure_class == "OP_CPU_FALLBACK"
+            else "not supported"
+        )
+        return f"[AI][{chip}] {model}: {subject} {action} (transformers {transformers_version})"
     elif failure_class == "PRECISION":
         return f"[AI][{chip}] {model}: {subject} precision mismatch vs CPU (transformers {transformers_version})"
     elif failure_class == "CRASH":
@@ -81,7 +86,11 @@ def generate_issue_body(
     if failure_class == "CRASH":
         labels.append("bug")
         labels.append("P0")
-    elif failure_class in ("OP_UNSUPPORTED", "FEATURE_UNSUPPORTED"):
+    elif failure_class in (
+        "OP_UNSUPPORTED",
+        "OP_CPU_FALLBACK",
+        "FEATURE_UNSUPPORTED",
+    ):
         labels.append("enhancement")
     elif failure_class == "PRECISION":
         labels.append("bug")
@@ -91,15 +100,17 @@ def generate_issue_body(
     labels_str = ", ".join(labels)
 
     body = (
-        f"""## AI Agent Information
-- **Agent/Tool**: Transformers Auto-Triage
-- **Model**: Automated script
-- **Human Reviewer**: (assign manually)
-- **Automated**: Yes - this issue was auto-generated from test failure analysis
+        f"""## Issue Type
+- [x] Bug Report
+
+## AI Agent Information
+- **Agent**: Claude Code CLI with Transformers Auto-Triage evidence
+- **Model**: Fill in before filing
+- **Session Context**: Transformers coverage measurement on {chip}; human root-cause review is required before publication.
 
 ## Summary
 
-**Fingerprint**: `{fp}`
+Fingerprint: `{fp}`
 
 Test failure in `{nodeid}` indicates `{subject}` {failure_class.lower().replace("_", " ")} on {chip}.
 
@@ -108,15 +119,18 @@ This finding was:
 - Verified in isolation: {isolation_status}
 - Classified as: {failure_class}
 
-## Change Type
-- [x] Bug Fix
-- [ ] New Feature
-- [ ] Performance Optimization
-- [ ] Refactoring
-- [ ] Documentation
-- [ ] Testing
+## Expected vs Actual Behavior
 
-## Problem Analysis
+**Expected:**
+The measured operation or feature should execute on {chip} without an unsupported
+path, host fallback, numerical defect, or crash.
+
+**Actual:**
+```
+{mechanism}
+```
+
+## Root Cause Analysis
 
 ### What is broken?
 
@@ -126,7 +140,11 @@ This finding was:
 {mechanism}
 ```
 
-### Reproduction
+## Reproduction
+
+The isolated upstream test is retained when a standalone reduction is not yet
+available. Replace this section with a validated minimal `torch`/`torch_fl`
+reproducer before filing whenever possible.
 
 **Test command** (isolated):
 ```bash
@@ -141,15 +159,24 @@ This finding was:
 {"..." if len(detail) > 1000 else ""}
 ```
 
-### Environment
+## Environment
+<details>
+<summary>Click to expand environment details</summary>
 
-- **Chip**: {chip}
-- **Device**: flagos
+- **Platform**: {chip}
+- **Python**: Fill in before filing
 - **PyTorch**: {pytorch_version}
+- **torch_fl**: commit `{torch_fl_commit}`
 - **Transformers**: {transformers_version}
-- **torch_fl commit**: {torch_fl_commit}
+- **Hardware**: {chip}; fill in driver and SDK versions before filing
 
-### Root Cause Analysis
+**Runtime config:**
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0
+TRANSFORMERS_TEST_DEVICE_SPEC=hf_device_spec.py
+FLAGOS_LOG_FALLBACK=1
+```
+</details>
 
 **Class**: {failure_class}
 
@@ -182,32 +209,32 @@ The finding was re-run in a fresh subprocess to distinguish real failures from d
 
 """
         + (
-            """
-1. Implement `{subject}` for flagos backend
-2. Register the operator in the appropriate backend file (csrc/aten/backends/*/...)
-3. Add unit test for the operator
-4. Rerun the transformers test to verify
+            f"""
+1. Add a device implementation for `{subject}` on {chip}
+2. Route the operator through the platform's existing code generator and commit regenerated artifacts
+3. Remove the CPU round-trip for the measured dtype and shape
+4. Add an operator test and rerun the Transformers nodeid
+"""
+            if failure_class == "OP_CPU_FALLBACK"
+            else f"""
+1. Implement `{subject}` for the flagos backend responsible for `{finding.get("component", "unknown")}`
+2. Use that platform's existing code generator and commit regenerated artifacts when the platform is not CUDA-compatible
+3. Add an operator-level regression test for the measured dtype and shape
+4. Rerun the isolated Transformers test and the affected architecture suite
 """
             if failure_class == "OP_UNSUPPORTED"
             else """
-1. Investigate the precision difference vs CPU
-2. Check if accumulation order or reduced-precision intermediates are causing the mismatch
-3. Validate against CUDA if available to determine acceptable tolerance
-4. Fix implementation or adjust test tolerance if justified
+1. Investigate the precision difference vs CPU using the same dtype and seed
+2. Identify the responsible operator and compare the backend path against eager CPU
+3. Fix the implementation, or propose an upstream tolerance only with measured justification
+4. Rerun the isolated nodeid and the affected architecture suite
 """
             if failure_class == "PRECISION"
             else """
-1. Investigate the crash location using debugger or LAUNCH_BLOCKING
-2. Fix the underlying cause (memory access, kernel launch, etc.)
-3. Rerun affected tests to verify fix
-4. Check for device poisoning after fix (run full test suite)
-"""
-            if failure_class == "CRASH"
-            else """
-1. Investigate the failure and determine root cause
-2. Implement the missing feature or fix the bug
-3. Add test coverage
-4. Verify fix with transformers test
+1. Reduce the failure to the first operation that reproduces it in a fresh process
+2. Identify the responsible torch_fl, vendor, or upstream component before filing a fix
+3. Add unit and integration regression coverage
+4. Rerun the isolated nodeid and then the full architecture suite
 """
         )
         + f"""
@@ -228,29 +255,37 @@ The finding was re-run in a fresh subprocess to distinguish real failures from d
 - [ ] Verify no device poisoning in full suite
 - [ ] Check performance impact
 
-## Related Work
+## Context & Investigation
 
-- Discovered during transformers coverage sweep
+- Discovered during a Transformers coverage sweep
 - Related models: {models}
 - Total occurrences: {count}
+- Cause fingerprint checked before filing: `{fp}`
+- Isolation outcome: `{finding.get("verdict", "UNKNOWN")}`
 
-## Checklist
-- [x] Automated classification completed
-- [x] Isolation verification completed
-- [x] Fingerprint computed for deduplication
-- [x] Environment details provided
-- [x] Root cause analysis documented
-- [ ] Human review required
-- [ ] Fix implementation pending
+## Related Code Locations
+
+- Fill in the responsible torch_fl, generated backend, vendor, or upstream
+  `file:line` locations after root-cause review and before filing.
+
+## Checklist - AI Agents MUST Complete All
+- [ ] I have provided complete environment information
+- [ ] I have included a minimal, self-contained reproducer, or explained why the exact isolated test is the smallest available case
+- [x] I have included captured error output
+- [ ] I have analyzed the root cause (not just symptoms)
+- [ ] I have proposed a specific solution with implementation approach
+- [ ] I have identified affected code locations with line numbers
+- [x] I have described how to verify the fix
+- [x] I have checked for duplicate issues
+- [x] All text is in **English**
+- [ ] Human reviewer has completed the draft before publication
 
 ---
 
-**Labels**: {labels_str}
-
-**Priority**: {"P0 (blocker)" if failure_class == "CRASH" else "P1 (high)" if failure_class == "OP_UNSUPPORTED" else "P2 (medium)"}
+**Suggested labels**: {labels_str}
 
 ---
-🤖 Auto-generated by transformers-auto-triage
+🤖 Draft generated by transformers-auto-triage; publication requires human review and explicit authorization
 """
     )
 
@@ -290,7 +325,7 @@ def generate_preview_markdown(
 
 **Title**: `{title}`
 
-**Fingerprint**: `{fp}`
+Fingerprint: `{fp}`
 
 **Class**: {finding["class"]}
 
@@ -319,24 +354,17 @@ def generate_preview_markdown(
 
 ## Action Required
 
-Review the {total} issue(s) above. To proceed:
+Review the {total} issue(s) above. File only the fingerprints that the user
+explicitly approved after reviewing each root cause and issue body:
 
-### Option 1: File all issues
-```bash
-python scripts/transformers_file_issues.py {issue_bodies_dir.parent / (issue_bodies_dir.parent.stem + "-new.json")} \\
-    --approve-all \\
-    --repo flagos-ai/Torch-FL
-```
-
-### Option 2: File specific issues by fingerprint
+### File explicitly approved issues
 ```bash
 python scripts/transformers_file_issues.py {issue_bodies_dir.parent / (issue_bodies_dir.parent.stem + "-new.json")} \\
     --approve {" ".join(f["fingerprint"] for f in findings[:3])} \\
     --repo flagos-ai/Torch-FL
 ```
 
-### Option 3: Cancel
-(do nothing - no issues will be filed)
+Approval for one finding does not authorize any other finding or tracker action.
 
 ---
 
