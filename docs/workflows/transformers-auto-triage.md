@@ -1,410 +1,319 @@
 # Transformers Auto-Triage Workflow
 
-Automated pipeline for triaging HuggingFace transformers test failures and filing GitHub issues.
+This workflow turns an official HuggingFace architecture report into verified,
+deduplicated issue drafts. The automated path is report-only. GitHub issue
+creation is a separate, explicitly authorized action after human review.
 
 ## Overview
 
-**Time**: ~6 minutes (5min automation + 1min human review)  
-**Replaces**: 2 hours of manual classification, verification, and issue filing
+```text
+test-results.json
+    -> triage
+classified.json
+    -> serial fresh-process verification
+verified.json
+    -> baseline and GitHub deduplication
+new.json
+    -> issue draft generation
+preview.md + issues/*.md
+    -> human completion and explicit fingerprint approval
+optional GitHub issue creation
+```
+
+The stages are separate so intermediate evidence remains inspectable and the
+workflow can resume without rerunning the hardware suite.
 
 ## Quick Start
 
+The normal entry point runs the report-only pipeline:
+
 ```bash
-# Run complete pipeline for a model
-MODEL=qwen3
-CHIP=MUSA
-TF_VERSION=4.47.0
-
-# 1. Classify failures
-python scripts/transformers_triage.py \
-  ~/test-results/${MODEL}.json \
-  --output /tmp/${MODEL}-classified.json
-
-# 2. Verify in isolation
-python scripts/transformers_verify.py \
-  /tmp/${MODEL}-classified.json \
-  --output /tmp/${MODEL}-verified.json \
-  --test-source-dir tests/transformers/models/${MODEL} \
-  --workers 1
-
-# 3. Deduplicate
-python scripts/transformers_deduplicate.py \
-  /tmp/${MODEL}-verified.json \
-  --output /tmp/${MODEL}-new.json \
-  --baseline docs/reference/hf-coverage.md \
-  --repo flagos-ai/Torch-FL
-
-# 4. Generate issue previews
-python scripts/transformers_preview_issues.py \
-  /tmp/${MODEL}-new.json \
-  --chip ${CHIP} \
-  --model ${MODEL} \
-  --transformers-version ${TF_VERSION} \
-  --preview /tmp/${MODEL}-preview.md
-
-# 5. Review and file
-cat /tmp/${MODEL}-preview.md
-python scripts/transformers_file_issues.py \
-  /tmp/${MODEL}-new.json \
-  --approve <explicitly-approved-fingerprint> \
-  --repo flagos-ai/Torch-FL
+bash scripts/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
 ```
 
-## Pipeline Stages
+For weak-model guardrails or an explicitly requested safe run:
 
-### 1. Classification (`transformers_triage.py`)
+```bash
+python scripts/safe_transformers_wrapper.py \
+    test qwen3 "MUSA MTT S5000" --device flagos
+```
 
-**Input**: pytest-json-report output  
-**Output**: Classified failures with fingerprints
+Both commands stop after preview generation.
 
-**What it does**:
-- Platform-agnostic crash detection (exit codes, signals, timeouts)
-- Classifies into: OP_UNSUPPORTED, PRECISION, CRASH, FEATURE_UNSUPPORTED
-- Groups related failures by fingerprint
-- No chip-specific keywords required
+## Stage 1: Official Test Run
 
-**Example**:
+The automatic sweep invokes the version-matched official runner in resilient
+mode:
+
+```bash
+python tests/manual/transformers_hf_tests.py \
+    --model qwen3 \
+    --device flagos \
+    --resilient \
+    --out /tmp/qwen3-results.json
+```
+
+The runner:
+
+- loads the device through `TRANSFORMERS_TEST_DEVICE_SPEC`;
+- disables optional backend autoloading that can break collection;
+- enables `FLAGOS_LOG_FALLBACK=1`;
+- executes selected nodeids in isolated batches;
+- preserves completed records when a batch crashes or times out;
+- atomically rewrites the aggregate report after each batch.
+
+A `BATCH_CRASHED` record means that nodeid did not report before its batch
+stopped. It is not a confirmed per-test defect.
+
+## Stage 2: Triage
+
 ```bash
 python scripts/transformers_triage.py \
-  ~/qwen3-test-results.json \
-  --output /tmp/qwen3-classified.json
+    /tmp/qwen3-results.json \
+    --out /tmp/qwen3-classified.json
 ```
 
-**Output summary**:
+Triage recognizes these actionable classes:
+
+| Class | Meaning |
+| --- | --- |
+| `OP_UNSUPPORTED` | An operator has no usable device implementation |
+| `OP_CPU_FALLBACK` | Runtime logs show that an operator executed on the host |
+| `FEATURE_UNSUPPORTED` | A non-operator API or device feature is unavailable |
+| `PRECISION` | Device output differs from the CPU baseline |
+| `CRASH` | Per-test evidence shows a fatal device/process failure or timeout |
+
+`PRECISION_KNOWN_ISSUE` and `UNKNOWN` remain visible for review but should not be
+published without further investigation.
+
+### CPU fallback
+
+A passing model assertion can still produce `OP_CPU_FALLBACK`. The operator is a
+coverage gap because the measured computation did not stay on the accelerator.
+The fallback log is direct evidence, so these findings are marked confirmed and
+do not need another reproduction run.
+
+### Crash attribution
+
+A run-level poisoned-context flag is never applied to every failed test. Triage
+requires per-test crash evidence such as an illegal memory access, device-side
+assertion, fatal signal, or timeout. Later failures remain unclassified or are
+classified by their own error text until they reproduce independently.
+
+### Cause fingerprints
+
+Findings are grouped with a hash of:
+
+```text
+failure class | responsible component | subject | normalized mechanism
 ```
-Summary:
-  total_tests: 847
-  passed: 520
-  failed: 327
-  OP_UNSUPPORTED: 45
-  PRECISION: 12
-  CRASH: 3
-  FEATURE_UNSUPPORTED: 8
-  UNKNOWN: 259
-```
 
-### 2. Verification (`transformers_verify.py`)
+Model names and nodeids are occurrences, not cause identity. Including the
+component prevents unrelated platform backends from sharing a fingerprint.
 
-**Input**: Classified failures  
-**Output**: Verified real failures (collateral removed)
+## Stage 3: Serial Verification
 
-**What it does**:
-- Reruns each failed test in subprocess isolation
-- Parallel execution (default 4 workers)
-- Separates real failures from collateral damage
-- Configurable timeout per test
-
-**Example**:
 ```bash
+TRANSFORMERS_VERSION=$(python -c 'import transformers; print(transformers.__version__)')
+
 python scripts/transformers_verify.py \
-  /tmp/qwen3-classified.json \
-  --output /tmp/qwen3-verified.json \
-  --test-source-dir tests/transformers/models/qwen3 \
-  --workers 1 \
-  --timeout 60
+    /tmp/qwen3-classified.json \
+    --out /tmp/qwen3-verified.json \
+    --test-source-dir /root/.cache/torch_fl/hf-tests \
+    --transformers-version "${TRANSFORMERS_VERSION}" \
+    --workers 1 \
+    --timeout 120
 ```
 
-**Output summary**:
-```
-Verification summary:
-  REPRODUCED: 58
-  COLLATERAL: 269
-  total_findings: 68
-  verified_findings: 58
-```
+The verifier recreates the official runner's pytest environment and runs exactly
+one selected nodeid in each fresh subprocess. Passing both the architecture
+directory and a nodeid is forbidden because pytest treats the selectors as a
+union and runs the whole directory.
 
-### 3. Deduplication (`transformers_deduplicate.py`)
+An isolation result is valid only when pytest collected exactly one test.
 
-**Input**: Verified failures  
-**Output**: New findings not in baseline
+### Verdict mapping
 
-**What it does**:
-- Checks fingerprints against `docs/reference/hf-coverage.md`
-- Searches GitHub issues via `gh` CLI
-- Only keeps genuinely new findings
-- Fingerprint-based exact matching
+| Isolated result | Verdict | Filing effect |
+| --- | --- | --- |
+| `FAIL` | `CONFIRMED` | May continue through the evidence gates |
+| `TIMEOUT` | `CONFIRMED` | May continue, with timeout evidence |
+| `PASS` | `COLLATERAL` | Blocked |
+| `SKIP` | `COLLATERAL` | Blocked |
+| runner/setup `ERROR` | `INCONCLUSIVE` | Blocked |
 
-**Example**:
+Verification is serial. Multiple subprocesses can still contend for one device
+context and memory pool, so `--workers` values other than one are rejected until
+per-worker device isolation exists.
+
+## Stage 4: Deduplication
+
 ```bash
 python scripts/transformers_deduplicate.py \
-  /tmp/qwen3-verified.json \
-  --output /tmp/qwen3-new.json \
-  --baseline docs/reference/hf-coverage.md \
-  --repo flagos-ai/Torch-FL
+    /tmp/qwen3-verified.json \
+    --out /tmp/qwen3-new.json \
+    --coverage-file docs/reference/hf-coverage.md \
+    --repo flagos-ai/Torch-FL
 ```
 
-**Output summary**:
-```
-Deduplication summary:
-  new: 15
-  known_baseline: 32
-  known_github: 11
-  total_new_findings: 15
-```
+Deduplication checks:
 
-### 4. Preview Generation (`transformers_preview_issues.py`)
+1. exact fingerprints in the coverage record;
+2. exact fingerprints in issue bodies;
+3. exact fingerprints in issue comments;
+4. semantic subject matches for older issues without fingerprints.
 
-**Input**: New findings  
-**Output**: Issue bodies and consolidated preview
+An exact match is a duplicate. A semantic match is marked
+`REVIEW_CANDIDATE` and requires a human to compare the component and mechanism.
+It is not silently treated as the same root cause.
 
-**What it does**:
-- Generates individual issue body files
-- Creates consolidated markdown preview
-- Follows `.github/ISSUE_TEMPLATE/ai_agent_issue.md` format
-- Includes root cause, investigation, and evidence
+Collateral and inconclusive findings are omitted from the output intended for
+issue preview.
 
-**Example**:
+Use `--skip-github` only for local tests of the tooling. A real publication
+workflow must search the tracker before filing.
+
+## Stage 5: Preview Generation
+
 ```bash
 python scripts/transformers_preview_issues.py \
-  /tmp/qwen3-new.json \
-  --chip MUSA \
-  --model qwen3 \
-  --transformers-version 4.47.0 \
-  --issue-bodies-dir /tmp/transformers-issues \
-  --preview /tmp/qwen3-preview.md
+    /tmp/qwen3-new.json \
+    --chip "MUSA MTT S5000" \
+    --transformers-version "${TRANSFORMERS_VERSION}" \
+    --torch-fl-commit "$(git rev-parse --short HEAD)" \
+    --issue-bodies-dir /tmp/qwen3-issues \
+    --out /tmp/qwen3-preview.md
 ```
 
-**Output files**:
-```
-/tmp/transformers-issues/
-  ├── issue-a1b2c3d4e5f6.md
-  ├── issue-b2c3d4e5f6g7.md
-  └── ...
-/tmp/qwen3-preview.md
-```
+The tool writes one Markdown body per fingerprint and a consolidated preview.
+Drafts follow the repository's AI issue template structure, but they are
+intentionally incomplete. Before publication, a human or capable agent must add
+and validate:
 
-### 5. Issue Filing (`transformers_file_issues.py`)
+- the actual AI model and full environment;
+- a minimal self-contained reproducer, or a defensible explanation of why the
+  exact isolated upstream test is the smallest available reproduction;
+- root-cause analysis rather than an error restatement;
+- a specific proposed solution;
+- responsible code locations with line numbers;
+- a completed issue checklist.
 
-**Input**: New findings + approval  
-**Output**: Filed GitHub issues + updated baseline
+The preview's proposed operator solution directs non-CUDA-compatible platforms
+to their code generator rather than handwritten per-operator kernels.
 
-**What it does**:
-- Creates GitHub issues via `gh` CLI
-- Applies appropriate labels (P0 for crashes, enhancement for unsupported ops)
-- Updates `docs/reference/hf-coverage.md` with issue numbers
-- Rate limiting (2s delay between issues)
+## Stage 6: Optional Issue Filing
 
-**Example - file all**:
+Issue creation is not part of the automatic or safe sweep. It is allowed only
+after the user has reviewed a named set of findings and explicitly authorized
+those fingerprints.
+
 ```bash
 python scripts/transformers_file_issues.py \
-  /tmp/qwen3-new.json \
-  --approve <explicitly-approved-fingerprint> \
-  --repo flagos-ai/Torch-FL
+    /tmp/qwen3-new.json \
+    --issue-bodies-dir /tmp/qwen3-issues \
+    --approve <fingerprint> [<fingerprint> ...] \
+    --repo flagos-ai/Torch-FL
 ```
 
-**Example - file specific**:
-```bash
-python scripts/transformers_file_issues.py \
-  /tmp/qwen3-new.json \
-  --approve a1b2c3d4e5f6 b2c3d4e5f6g7 c3d4e5f6g7h8 \
-  --repo flagos-ai/Torch-FL
-```
+The filing tool rejects:
 
-**Example - dry run**:
-```bash
-python scripts/transformers_file_issues.py \
-  /tmp/qwen3-new.json \
-  --approve <explicitly-approved-fingerprint> \
-  --dry-run
-```
+- fingerprints not present in the input;
+- findings whose verdict is not `CONFIRMED`;
+- drafts that still contain required review placeholders;
+- missing body files.
 
-**Output summary**:
-```
-Filing complete
-============================================================
-Successfully filed: 15
-Failed: 0
+There is no bulk `--approve-all` path. Approval for one finding does not cover
+later findings or another tracker action.
 
-Filed issues:
-  #251: a1b2c3d4e5f6
-  #252: b2c3d4e5f6g7
-  ...
+When issues are created successfully, the tool appends their fingerprints and
+issue numbers to `docs/reference/hf-coverage.md`. Commit that documentation
+change through the normal fork-and-PR workflow; the script must not push a
+branch itself.
 
-Updated docs/reference/hf-coverage.md with 15 issue references
-```
+## Failure Classes and Labels
 
-## Cross-Platform Support
+| Class | Suggested labels |
+| --- | --- |
+| `OP_UNSUPPORTED` | `enhancement`, `ai-generated` |
+| `OP_CPU_FALLBACK` | `enhancement`, `ai-generated` |
+| `FEATURE_UNSUPPORTED` | `enhancement`, `ai-generated` |
+| `PRECISION` | `bug`, `ai-generated` |
+| `CRASH` | `bug`, `P0`, `ai-generated` |
 
-All tools work with any chip using `torch.flagos`:
+Confirm the repository's current labels before publication.
 
-- **MUSA** (Moore Threads)
-- **GCU** (Enflame)
-- **Ascend** (Huawei)
-- **MetaX** (MetaX)
-- **PPU** (Stream Computing)
-- **Graphcore** IPU
-- **Habana** Gaudi
-- **Cambricon** MLU
+## Baseline Semantics
 
-No chip-specific keywords or detection logic. Universal crash patterns based on:
-- Exit codes (segfault, timeout)
-- Generic error signals
-- Device context poisoning
-- Python exception types
+A baseline is scoped to the measured hardware, device, Transformers version, and
+torch_fl commit. It supports comparisons and regression claims; it is not a
+permission gate that suppresses every first-sweep defect.
 
-## Failure Classifications
+A first sweep may produce an issue when an individual finding has complete
+evidence, independent reproduction where required, a named cause, deduplication,
+a finished issue body, and explicit authorization. Describe it as observed on
+the pinned tuple, not as a regression without an earlier matching measurement.
 
-### OP_UNSUPPORTED
-Operation not implemented on the chip backend.
+## Safe Wrapper Boundaries
 
-**Detection**: Error messages containing "not implemented", "unsupported", or operator name extraction.
+The safe wrapper validates model, device, chip, and repository parameters and
+invokes only the checked report-only scripts. It does not install dependencies,
+edit source files, change the parent shell environment, or publish issues.
 
-**Labels**: `ai-generated`, `enhancement`
-
-**Example**: `aten::scaled_dot_product_attention not supported on flagos device`
-
-### PRECISION
-Numerical mismatch vs CPU reference.
-
-**Detection**: Assertion errors with tensor comparisons, "torch.testing.assert_close" failures.
-
-**Labels**: `ai-generated`, `bug`
-
-**Example**: `Tensor mismatch: max_diff=0.05, expected < 0.001`
-
-### CRASH
-Segfault, SIGABRT, timeout, or device context poisoning.
-
-**Detection**: Exit codes, signal names, timeout markers, context poison flag.
-
-**Labels**: `ai-generated`, `bug`, `P0`
-
-**Example**: `Segmentation fault (core dumped)`
-
-### FEATURE_UNSUPPORTED
-PyTorch feature not available on PrivateUse1 devices.
-
-**Detection**: Error messages about registration, dispatch, or device type restrictions.
-
-**Labels**: `ai-generated`, `enhancement`
-
-**Example**: `flex_attention not supported for PrivateUse1 devices`
-
-## Configuration
-
-### Verification Timeout
-
-Adjust per-test timeout based on model complexity:
-
-```bash
-# Fast models (< 1s per test)
-python scripts/transformers_verify.py ... --timeout 30
-
-# Average models (1-5s per test)
-python scripts/transformers_verify.py ... --timeout 60
-
-# Large models (5-30s per test)
-python scripts/transformers_verify.py ... --timeout 120
-```
-
-### Parallel Workers
-
-Adjust based on available CPU cores and memory:
-
-```bash
-# Conservative (low memory)
-python scripts/transformers_verify.py ... --workers 1
-
-# Balanced (default)
-python scripts/transformers_verify.py ... --workers 1
-
-# Aggressive (high memory, many cores)
-python scripts/transformers_verify.py ... --workers 1
-```
-
-### Issue Filing Rate Limit
-
-Adjust delay between GitHub API calls:
-
-```bash
-# Slower (more conservative)
-python scripts/transformers_file_issues.py ... --delay 5.0
-
-# Default
-python scripts/transformers_file_issues.py ... --delay 2.0
-
-# Faster (risk rate limiting)
-python scripts/transformers_file_issues.py ... --delay 1.0
-```
-
-## Baseline Management
-
-### Recording Baseline
-
-After filing issues, the baseline is automatically updated:
-
-```markdown
-## qwen3 - MUSA - 2026-09-02
-
-- **Transformers**: 4.47.0
-- **PyTorch**: 2.10.0
-- **Torch-FL**: 64e60dd
-- **Total tests**: 847
-- **Passed**: 520
-- **Failed**: 327
-
-| Fingerprint | Class | Subject | Issue |
-| --- | --- | --- | --- |
-| `a1b2c3d4e5f6` | OP_UNSUPPORTED | scaled_dot_product_attention | [#251](https://github.com/flagos-ai/Torch-FL/issues/251) |
-| `b2c3d4e5f6g7` | CRASH | device context poisoned | [#252](https://github.com/flagos-ai/Torch-FL/issues/252) |
-```
-
-### Baseline Scoping
-
-Only findings with **identical fingerprint** are considered "known". This means:
-
-- Same operation/error pattern
-- Same failure mechanism
-- Same subject
-
-Different models hitting the same underlying issue share the same fingerprint and are deduplicated.
+If preflight dependencies are missing, stop and report the environment problem
+rather than modifying the torch installation during the measurement.
 
 ## Troubleshooting
 
-### No findings classified
+### All findings are `UNKNOWN`
 
-**Symptom**: All failures marked as "UNKNOWN"
+Inspect `representative_detail` in the classified JSON. Confirm that the official
+runner captured the exception tail and that the record is a test failure rather
+than a setup or collection error. Add a classifier pattern only after the
+mechanism is understood.
 
-**Fix**: The test output format may not match expected patterns. Check that:
-- Input is valid pytest-json-report format
-- Test actually failed (not skipped or passed)
-- Error details are present in JSON
+### A verifier result is `ERROR`
 
-### Verification hangs
+Treat it as inconclusive. Check the exact source version, pytest root, device
+specification, imports, and selected nodeid. Do not convert it to confirmed based
+on the original suite failure.
 
-**Symptom**: `transformers_verify.py` stuck on one test
+### A nodeid rerun collects many tests
 
-**Fix**: Increase timeout or kill hanging process:
+Remove the architecture directory from the pytest command. Pass the nodeid only
+and confirm the output says one test was collected.
+
+### A semantic duplicate candidate appears
+
+Read both issue bodies and compare the responsible component, subject, dtype,
+shape, and normalized mechanism. Mark it as an exact duplicate only after that
+review.
+
+### The issue body uses `[AI][Unknown]`
+
+Regenerate the draft with `--chip`, or ensure the body contains either the
+current `- **Platform**: ...` field or the legacy `- **Chip**: ...` field. The
+filer supports both forms.
+
+## Verification of the Tooling
+
 ```bash
-# Increase timeout
-python scripts/transformers_verify.py ... --timeout 120
-
-# Find and kill hanging test
-ps aux | grep pytest
-kill -9 <pid>
+ruff check
+ruff format --check
+pytest tests/unit/test_transformers_hf_tests.py \
+       tests/unit/test_transformers_automation.py -q
+python scripts/test_transformers_automation.py
+bash -n scripts/transformers_auto_sweep.sh \
+        scripts/transformers_batch_sweep.sh
 ```
 
-### GitHub API rate limit
+The smoke test covers triage, deduplication, and preview generation. It
+intentionally excludes GitHub filing because generated drafts require human
+completion and explicit authorization.
 
-**Symptom**: `transformers_file_issues.py` returns 403 errors
+## Related Documentation
 
-**Fix**: Increase delay between requests:
-```bash
-python scripts/transformers_file_issues.py ... --delay 5.0
-```
-
-### Duplicate issues filed
-
-**Symptom**: Same issue filed multiple times
-
-**Fix**: Ensure baseline is up to date before filing. If duplicates exist:
-1. Close the duplicate issues on GitHub
-2. Update baseline with the kept issue number
-3. Rerun deduplication before next filing
-
-## See Also
-
-- `.claude/skills/transformers-auto-triage/SKILL.md` - Skill documentation
-- `.github/ISSUE_TEMPLATE/ai_agent_issue.md` - Issue template format
-- `docs/reference/hf-coverage.md` - Test baseline records
-- `.claude/skills/transformers-test/SKILL.md` - Original manual workflow
+- `.claude/skills/transformers-test/SKILL.md`
+- `docs/workflows/resilient-testing-quickstart.md`
+- `docs/design/robust-harness-proposal.md`
+- `docs/reference/hf-coverage.md`
+- `.github/ISSUE_TEMPLATE/ai_agent_issue.md`

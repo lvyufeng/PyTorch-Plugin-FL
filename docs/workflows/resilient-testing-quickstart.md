@@ -1,302 +1,273 @@
-# Resilient Transformers Testing - Quick Start
+# Resilient Transformers Testing Quick Start
 
-## 新功能：Resilient Mode
+Resilient mode runs an official HuggingFace architecture suite in isolated
+batches. If one batch crashes or times out, the runner preserves completed
+records and continues with the remaining batches.
 
-Resilient模式让测试harness在遇到crash/hang时依然能完成测试并自动提issue。
+The automation is report-only: it generates evidence and issue drafts but never
+publishes GitHub issues by itself.
 
-### 核心改进
+## Quick Start
 
-1. **分批运行** - 每批20个test，crash只影响当前批次
-2. **增量输出** - 边跑边写，不等全部完成
-3. **自动恢复** - Crash后自动继续下一批
-4. **端到端自动化** - 从测试到提issue零人工介入
-
-## 快速开始
-
-### 单个模型（推荐）
+### One model
 
 ```bash
-# 测试bert并自动提issue
-bash scripts/transformers_auto_sweep.sh bert gcu GCU flagos-ai/Torch-FL
-
-# 测试qwen3
-bash scripts/transformers_auto_sweep.sh qwen3 gcu GCU flagos-ai/Torch-FL
+bash scripts/transformers_auto_sweep.sh bert gcu GCU
+bash scripts/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
 ```
 
-**参数说明**：
-- `bert` / `qwen3` - 模型名称
-- `gcu` - 设备名称（torch.flagos的device参数）
-- `GCU` - 芯片名称（用于issue标题，如 `[AI][GCU]`）
-- `flagos-ai/Torch-FL` - GitHub仓库
+Arguments:
 
-### 批量运行（bert + qwen3）
+1. Model architecture name, such as `bert` or `qwen3`.
+2. Torch device name. Use the device accepted by the runner; for the standard
+   torch_fl PrivateUse1 flow this is normally `flagos`.
+3. Hardware name used in the report and issue preview.
+4. Optional repository for duplicate search, defaulting to
+   `flagos-ai/Torch-FL`.
+
+### Batch wrapper
 
 ```bash
-# 一次运行两个模型
-bash scripts/transformers_batch_sweep.sh gcu GCU flagos-ai/Torch-FL
+bash scripts/transformers_batch_sweep.sh gcu GCU
 ```
 
-### 手动分步运行
+The batch wrapper runs its configured model list one architecture at a time. It
+still stops before issue publication.
 
-如果需要更细粒度控制：
+## Manual Workflow
+
+Use the individual tools when investigating a failure or reviewing intermediate
+outputs:
 
 ```bash
-MODEL=bert
-DEVICE=gcu
-CHIP=GCU
+MODEL=qwen3
+DEVICE=flagos
+CHIP="MUSA MTT S5000"
+RESULT_ROOT=/tmp/transformers-${MODEL}
+TRANSFORMERS_VERSION=$(python -c 'import transformers; print(transformers.__version__)')
 
-# Step 1: 运行测试（resilient模式）
+# 1. Run official tests in resilient batches.
 python tests/manual/transformers_hf_tests.py \
-    --model ${MODEL} \
-    --device ${DEVICE} \
+    --model "${MODEL}" \
+    --device "${DEVICE}" \
     --resilient \
     --batch-size 20 \
     --batch-timeout 900 \
-    --out /tmp/${MODEL}-results.json
+    --out "${RESULT_ROOT}-results.json"
 
-# Step 2: Triage
+# 2. Classify failures and measured CPU fallbacks.
 python scripts/transformers_triage.py \
-    /tmp/${MODEL}-results.json \
-    --out /tmp/${MODEL}-classified.json
+    "${RESULT_ROOT}-results.json" \
+    --out "${RESULT_ROOT}-classified.json"
 
-# Step 3: Verify
+# 3. Verify candidate failures serially in fresh subprocesses.
 python scripts/transformers_verify.py \
-    /tmp/${MODEL}-classified.json \
-    --out /tmp/${MODEL}-verified.json \
-    --test-source-dir tests/transformers/models/${MODEL} \
+    "${RESULT_ROOT}-classified.json" \
+    --out "${RESULT_ROOT}-verified.json" \
+    --test-source-dir /root/.cache/torch_fl/hf-tests \
+    --transformers-version "${TRANSFORMERS_VERSION}" \
     --workers 1
 
-# Step 4: Deduplicate
+# 4. Check exact fingerprints and semantic duplicate candidates.
 python scripts/transformers_deduplicate.py \
-    /tmp/${MODEL}-verified.json \
-    --out /tmp/${MODEL}-new.json \
+    "${RESULT_ROOT}-verified.json" \
+    --out "${RESULT_ROOT}-new.json" \
     --coverage-file docs/reference/hf-coverage.md \
     --repo flagos-ai/Torch-FL
 
-# Step 5: Preview
+# 5. Generate incomplete drafts for human review.
 python scripts/transformers_preview_issues.py \
-    /tmp/${MODEL}-new.json \
-    --chip ${CHIP} \
-    --transformers-version 4.47.0 \
-    --torch-fl-commit $(git rev-parse --short HEAD) \
-    --issue-bodies-dir /tmp/${MODEL}-issues \
-    --out /tmp/${MODEL}-preview.md
+    "${RESULT_ROOT}-new.json" \
+    --chip "${CHIP}" \
+    --transformers-version "${TRANSFORMERS_VERSION}" \
+    --torch-fl-commit "$(git rev-parse --short HEAD)" \
+    --issue-bodies-dir "${RESULT_ROOT}-issues" \
+    --out "${RESULT_ROOT}-preview.md"
+```
 
-# Step 6: Review and file
-cat /tmp/${MODEL}-preview.md
+Review the preview and each body file. Complete the environment, reproducer,
+root-cause analysis, solution, code locations, and checklist before requesting
+publication.
+
+After the user explicitly approves named fingerprints, file only that approved
+set:
+
+```bash
 python scripts/transformers_file_issues.py \
-    /tmp/${MODEL}-new.json \
-    --approve <explicitly-approved-fingerprint> \
+    "${RESULT_ROOT}-new.json" \
+    --issue-bodies-dir "${RESULT_ROOT}-issues" \
+    --approve <fingerprint> [<fingerprint> ...] \
     --repo flagos-ai/Torch-FL
 ```
 
-## Resilient模式参数
+There is no `--approve-all` mode.
+
+## Resilient Mode Options
 
 ### `--resilient`
-启用resilient模式（分批运行）
+
+Collect the architecture suite, split it into batches, and run each batch in a
+fresh pytest subprocess.
 
 ### `--batch-size N`
-每批测试数量（默认：20）
 
-**建议**：
-- 20: 标准配置，平衡速度和隔离
-- 10: 如果频繁crash
-- 50: 如果测试稳定，想更快
+Number of nodeids per batch. The default is 20.
+
+- Use 10 when failures frequently crash or poison the device.
+- Use 20 for a new or moderately stable backend.
+- Use 50 only after the suite is stable enough that a crash is unlikely.
+
+Smaller batches reduce collateral uncertainty but increase pytest startup cost.
 
 ### `--batch-timeout N`
-每批超时时间，秒（默认：900 = 15分钟）
 
-**建议**：
-- 900: 标准配置
-- 1800: 大模型（llama, qwen等）
-- 600: 小模型（bert, distilbert等）
+Timeout in seconds for each batch. The default is 900.
 
-## 典型场景
+- Small architectures: 600 seconds may be sufficient.
+- Typical architectures: 900 seconds.
+- Large or compilation-heavy architectures: 1800 seconds.
 
-### 场景1：燧原S60首次测试bert
+A timeout preserves any records already emitted by the batch and marks only the
+remaining unreported nodeids as `BATCH_CRASHED`.
+
+## Interpreting Results
+
+### Completed records in a crashed batch
+
+A crashed batch may contain genuine `PASS`, `FAIL`, or `SKIP` records written
+before the process stopped. Those records are preserved. Do not replace the
+whole batch with crash placeholders.
+
+### `BATCH_CRASHED`
+
+This status means the subprocess stopped before that nodeid produced a report.
+It is not a confirmed per-test defect. Isolate the batch and then each candidate
+nodeid in a fresh process.
+
+### Context poisoning
+
+A run-level poisoning warning invalidates later observations, but it does not
+identify the triggering test. Only per-test evidence such as an illegal memory
+access, device-side assertion, fatal signal, or independent isolated failure can
+support a crash finding.
+
+### CPU fallback
+
+The runner enables `FLAGOS_LOG_FALLBACK=1`. Any operator listed under
+`cpu_fallback_ops` is an accelerator coverage gap even if the model assertion
+passed. Triage emits a confirmed `OP_CPU_FALLBACK` finding for each measured
+operator.
+
+### Verification verdicts
+
+- `FAIL` or `TIMEOUT` in the isolated rerun: `CONFIRMED`.
+- `PASS` or `SKIP`: `COLLATERAL`.
+- pytest setup, import, collection, or runner error: `INCONCLUSIVE`.
+
+Only confirmed findings can pass the filing gate.
+
+## Exact Test Isolation
+
+Do not combine an architecture directory with a nodeid:
 
 ```bash
-# 在S60机器上
-cd /path/to/PyTorch-Plugin-FL
-bash scripts/transformers_auto_sweep.sh bert gcu GCU
+# Wrong: pytest treats these as a union and runs the directory too.
+pytest tests/models/qwen3 \
+    tests/models/qwen3/test_modeling_qwen3.py::Qwen3ModelTest::test_example
+
+# Correct: pass only the nodeid.
+pytest \
+    tests/models/qwen3/test_modeling_qwen3.py::Qwen3ModelTest::test_example
 ```
 
-**预期**：
-- 自动分批运行所有bert测试
-- 遇到crash继续下一批
-- 最终自动提issue到GitHub
+An isolation result is valid only when pytest collected exactly one test.
 
-### 场景2：调试某个crash
+## Output Files
 
-如果知道某个test导致crash：
+The automatic sweep writes a timestamped directory under
+`/tmp/transformers-auto-sweep-<model>-*` containing:
 
-```bash
-# 正常模式运行单个test
-python tests/manual/transformers_hf_tests.py \
-    --model bert \
-    --pytest-arg "tests/models/bert/test_modeling_bert.py::BertModelTest::test_forward"
+```text
+test-results.json  raw official-runner results
+classified.json    cause-oriented findings
+verified.json      isolation outcomes and verdicts
+new.json           findings remaining after deduplication
+preview.md          consolidated human review preview
+issues/*.md         individual incomplete issue drafts
 ```
 
-### 场景3：查看中间结果
+Keep these files together when investigating or citing a run.
 
-Resilient模式的所有中间文件保存在 `/tmp/transformers-auto-sweep-<model>-<timestamp>/`：
+## Troubleshooting
+
+### No test results
+
+Check that the architecture exists in the installed Transformers version and
+that its exact source tree is available:
 
 ```bash
-ls -lh /tmp/transformers-auto-sweep-bert-*/
-
-# 输出：
-# test-results.json   - 原始测试结果
-# classified.json     - 分类后的findings
-# verified.json       - 隔离验证后
-# new.json           - 去重后新issues
-# preview.md         - Issue预览
-# issues/*.md        - 各个issue的body
-```
-
-### 场景4：只运行测试，不提issue
-
-修改 `transformers_auto_sweep.sh` 的第6步，或者手动运行前5步。
-
-## 与旧模式对比
-
-| 特性 | 旧模式 | Resilient模式 |
-|-----|--------|--------------|
-| 运行方式 | 一次性运行全部 | 分批运行 |
-| Crash影响 | 整个挂掉 | 只影响当前批次 |
-| 结果输出 | 全部完成后 | 边跑边写 |
-| 超时处理 | 整体超时 | 每批独立超时 |
-| 适用场景 | 稳定测试 | 新芯片/不稳定环境 |
-
-## 故障排查
-
-### 问题1：没有生成test-results.json
-
-**原因**：模型名称错误或collect失败
-
-**解决**：
-```bash
-# 检查模型名称
-python tests/manual/transformers_hf_tests.py --list-models | grep bert
-
-# 测试collect
+python tests/manual/transformers_hf_tests.py --list-models
 python tests/manual/transformers_hf_tests.py --model bert --collect-only
 ```
 
-### 问题2：所有batch都crash
+A source-version mismatch or collection failure is an environment result, not a
+backend finding.
 
-**原因**：环境问题（驱动、依赖等）
+### Every batch crashes
 
-**解决**：
+Validate the device before interpreting model results:
+
 ```bash
-# 检查设备
-python -c "import torch, torch_fl; print(torch.flagos.device_count())"
-
-# 检查依赖
-pip list | grep -E "transformers|torch|accelerate"
-
-# 运行sanity check
-python -c "
+python - <<'PY'
 import torch
 import torch_fl
-x = torch.randn(2, 3, device='flagos')
-print('Device OK:', x.device)
-"
+
+print("device count:", torch.flagos.device_count())
+x = torch.randn(2, 3, device="flagos")
+print("device:", x.device)
+PY
 ```
 
-### 问题3：Batch很慢
+Also record the driver, vendor SDK, torch, Transformers, and torch_fl versions.
+Do not install or replace packages as an ad hoc fix during a coverage run.
 
-**原因**：Batch size太大或timeout太长
+### One batch is slow
 
-**解决**：
+Reduce `--batch-size` to isolate the slow or hanging nodeid. Increase
+`--batch-timeout` only when the individual tests are expected to take longer;
+do not use a longer timeout to hide a hang.
+
+### Verification is rejected with multiple workers
+
+Use `--workers 1`. Separate subprocesses are not independent when they share the
+same accelerator and memory pool.
+
+### An issue is not filed
+
+The filer deliberately rejects:
+
+- unknown or unapproved fingerprints;
+- non-confirmed findings;
+- missing body files;
+- drafts containing mandatory review placeholders.
+
+Complete the draft and obtain explicit fingerprint-level authorization before
+retrying. A dry run still requires an approved fingerprint:
+
 ```bash
-# 减小batch size
---batch-size 10
-
-# 减小timeout
---batch-timeout 600
-```
-
-### 问题4：Issue没有提交
-
-**原因**：GitHub认证或权限问题
-
-**解决**：
-```bash
-# 检查gh CLI认证
-gh auth status
-
-# 测试dry-run
 python scripts/transformers_file_issues.py \
-    /tmp/bert-new.json \
-    --approve <explicitly-approved-fingerprint> \
-    --dry-run \
-    --repo flagos-ai/Torch-FL
+    /tmp/qwen3-new.json \
+    --issue-bodies-dir /tmp/qwen3-issues \
+    --approve <fingerprint> \
+    --dry-run
 ```
 
-## 配置建议
+## Recommended Practice
 
-### 不同芯片的配置
-
-**燧原GCU S60**:
-```bash
---batch-size 20
---batch-timeout 900
-```
-
-**摩尔线程MUSA**:
-```bash
---batch-size 20
---batch-timeout 900
-```
-
-**华为Ascend**:
-```bash
---batch-size 15  # 如果内存受限
---batch-timeout 1200
-```
-
-### 不同模型的配置
-
-**小模型 (bert, distilbert)**:
-```bash
---batch-size 50
---batch-timeout 600
-```
-
-**中模型 (gpt2, t5)**:
-```bash
---batch-size 20
---batch-timeout 900
-```
-
-**大模型 (llama, qwen3)**:
-```bash
---batch-size 10
---batch-timeout 1800
-```
-
-## 最佳实践
-
-1. **首次运行新芯片**：使用resilient模式 + 小batch (10-20)
-2. **稳定环境**：可以用正常模式（更快）
-3. **调试crash**：先用resilient找到crash的batch，再单独运行那批
-4. **批量测试**：使用 `transformers_batch_sweep.sh`
-5. **保留日志**：工作目录自动带时间戳，方便追溯
-
-## 后续扩展
-
-计划添加的功能：
-
-- [ ] Preflight checks（环境预检）
-- [ ] 进度实时显示
-- [ ] Web dashboard
-- [ ] 支持diffusers模型
-- [ ] 多机并行运行
-
-## 问题反馈
-
-遇到问题请提issue到 flagos-ai/Torch-FL，附上：
-1. 完整的命令行
-2. 工作目录路径
-3. test-results.json（如果有）
-4. 错误信息
+1. Start a new platform with batches of 10 to 20 tests.
+2. Preserve the original JSON and all isolated rerun output.
+3. Verify candidates serially and require exactly one collected nodeid.
+4. Treat fallback operators as missing accelerator coverage.
+5. Review semantic duplicate candidates manually.
+6. Generate previews first; never publish from the automated or safe wrapper.
+7. File only completed, confirmed, explicitly approved findings.

@@ -1,434 +1,289 @@
-# Transformers Test Automation - Implementation Summary
+# Transformers Automation Implementation Summary
 
-**Date**: 2026-09-02  
-**Branch**: `docs/hf-flex-skip-clean`  
-**Commits**: 8050d85, ebe32d4, 627b351
+## Scope
 
-## Problem Statement
+This change adds a report-only pipeline around the official HuggingFace
+architecture runner:
 
-The original `transformers-test` skill required ~2 hours of manual work per model to:
-1. Classify test failures by reading error messages
-2. Rerun tests individually to verify real failures vs collateral
-3. Search baseline and GitHub for known issues
-4. Write issue bodies manually
-5. File issues one by one
-
-**Three major issues identified:**
-1. **No automation** - All steps required human AI intervention
-2. **Not cross-chip** - Hard-coded keywords specific to certain devices
-3. **Weak model incompatibility** - Complex instructions that weaker models couldn't follow
-
-## Solution: 5-Tool Automation Pipeline
-
-### Architecture
-
-```
-test-results.json
-    ↓
-[1. Triage] → classified.json
-    ↓
-[2. Verify] → verified.json (serial isolation)
-    ↓
-[3. Deduplicate] → new.json (baseline + GitHub check)
-    ↓
-[4. Preview] → issue bodies + preview.md
-    ↓
-[5. File] → GitHub issues + updated baseline
+```text
+official tests
+    -> triage
+    -> serial verification
+    -> deduplication
+    -> issue previews
+    -> optional, explicitly authorized filing
 ```
 
-### Time Comparison
+It also adds resilient batch execution for platforms where a model test can
+crash, hang, or poison the device context.
 
-| Stage | Manual | Automated |
-|-------|--------|-----------|
-| Classification | 30 min | 5 sec |
-| Verification | 60 min | 5 min (serial) |
-| Deduplication | 20 min | 10 sec |
-| Issue writing | 10 min | 5 sec |
-| Filing | Manual | 30 sec |
-| **Total** | **~120 min** | **~6 min** |
+## Problems Addressed
 
-**Efficiency gain**: 95% reduction in manual work
+### Suite-wide failure after one device fault
 
-### Implementation Details
+The original runner used one pytest process for an architecture. A fatal device
+error could terminate that process, discard later coverage, and contaminate
+subsequent observations.
 
-#### 1. `transformers_triage.py` (345 lines)
+### Invalid isolation selectors
 
-**Purpose**: Classify failures with platform-agnostic detection
+A batch command passed both the architecture directory and selected nodeids.
+Pytest treats these as a union, so a purported one-test rerun could execute the
+entire directory. That made early isolation evidence invalid.
 
-**Key features**:
-- Universal crash detection (exit codes, signals, timeouts)
-- No chip-specific keywords
-- Fingerprint-based grouping
-- 4 failure classes: OP_UNSUPPORTED, PRECISION, CRASH, FEATURE_UNSUPPORTED
+### Lost records from crashed batches
 
-**Algorithm**:
-```python
-def detect_crash(test_record, run_info):
-    # Universal patterns that work for all 8 chips
-    if run_info.get('context_poison'):
-        return True, 'device_context_poisoned'
-    if 'segmentation fault' in detail.lower():
-        return True, 'segfault'
-    if 'timeout' in detail.lower():
-        return True, 'timeout'
-    # ... more generic patterns
-```
+A crashed batch was previously replaced wholesale with `BATCH_CRASHED`
+placeholders, even when the report plugin had already written valid results for
+some tests.
 
-#### 2. `transformers_verify.py` (312 lines)
+### Hidden host execution
 
-**Purpose**: Parallel isolation verification
+A test could pass while one or more operators used torch_fl's CPU fallback. The
+result looked like accelerator coverage even though part of the workload ran on
+the host.
 
-**Key features**:
-- ThreadPoolExecutor for serial test execution
-- Subprocess isolation per test
-- Configurable timeout and workers
-- Separates REPRODUCED from COLLATERAL
+### Unsafe verification and publication
 
-**Algorithm**:
-```python
-with ThreadPoolExecutor(max_workers=4) as executor:
-    futures = {
-        executor.submit(run_isolated_test, nodeid, timeout): finding
-        for finding in classified_findings
-    }
-    # Tests run serially to avoid cross-process accelerator interference
-```
+The initial automation used concurrent accelerator reruns, treated runner errors
+as reproduced failures, and offered a bulk issue-filing path. Generated issue
+bodies could therefore publish incomplete or incorrectly attributed findings.
 
-**Performance**: 60 min → 5 min for typical model (12x speedup)
+## Implemented Architecture
 
-#### 3. `transformers_deduplicate.py` (265 lines)
+### Official runner
 
-**Purpose**: Remove known issues from baseline and GitHub
+`tests/manual/transformers_hf_tests.py` now supports resilient batches while
+preserving the same version-matched source and device contract as a normal run.
+Important properties are:
 
-**Key features**:
-- Fingerprint-based exact matching
-- Searches `docs/reference/hf-coverage.md`
-- GitHub API search via `gh` CLI
-- Can skip GitHub for faster testing
+- selected-nodeid commands omit the architecture directory;
+- each batch has an independent process and timeout;
+- per-test JSONL records are reduced after every batch;
+- completed records survive a later batch crash;
+- only unreported nodeids become `BATCH_CRASHED`;
+- aggregate output is written incrementally;
+- long tracebacks preserve both their beginning and exception tail;
+- `FLAGOS_LOG_FALLBACK=1` is enabled and fallback operators are recorded.
 
-**Deduplication logic**:
-- Same fingerprint = known issue (exact match only)
-- Different subject/mechanism = new issue (even if same op)
+### Triage
 
-#### 4. `transformers_preview_issues.py` (435 lines)
+`scripts/transformers_triage.py` converts runner output into cause-oriented
+findings. It supports:
 
-**Purpose**: Generate issue bodies following AI agent template
+- `OP_UNSUPPORTED`;
+- `OP_CPU_FALLBACK`;
+- `FEATURE_UNSUPPORTED`;
+- `PRECISION`;
+- `CRASH`;
+- known precision patterns and unknown failures retained for review.
 
-**Key features**:
-- Follows `.github/ISSUE_TEMPLATE/ai_agent_issue.md`
-- Individual files per issue (`issue-{fingerprint}.md`)
-- Consolidated preview for human review
-- Auto-detects chip name from `torch.flagos`
+A run-level poison marker no longer classifies every failed test as a crash.
+Crash attribution requires per-test evidence. CPU fallback findings can come
+from otherwise passing tests and are confirmed directly by the runtime log.
 
-**Output structure**:
-```markdown
-## [AI][MUSA] qwen3: scaled_dot_product_attention not supported
+Fingerprints include the failure class, responsible component, subject, and
+normalized mechanism. Model names and nodeids are aggregated occurrences.
 
-**Fingerprint**: `a1b2c3d4e5f6`
-**Class**: OP_UNSUPPORTED
-**Chip**: MUSA MTT S5000
-...
+### Verification
 
-### Root Cause
-aten::scaled_dot_product_attention not implemented for flagos device
+`scripts/transformers_verify.py` reruns one representative nodeid per finding in
+a fresh pytest subprocess. It reconstructs the official environment with:
 
-### Investigation Process
-Automated classification via transformers_triage.py
-...
-```
+- the exact Transformers source tree;
+- the source `pyproject.toml` and root directory;
+- `hf_device_spec.py`;
+- source package symlinks and `PYTHONPATH` entries;
+- backend autoload disabled;
+- fallback logging enabled.
 
-#### 5. `transformers_file_issues.py` (310 lines)
+Verification defaults to one worker and rejects parallel execution because
+separate processes may still share an accelerator and memory pool.
 
-**Purpose**: Batch file approved issues to GitHub
+Verdicts are:
 
-**Key features**:
-- Selective filing by fingerprint
-- Dry-run mode for testing
-- Auto-labels based on failure class (P0 for crashes)
-- Rate limiting (2s delay between issues)
-- Updates baseline with issue numbers
+- `FAIL` or `TIMEOUT` -> `CONFIRMED`;
+- `PASS` or `SKIP` -> `COLLATERAL`;
+- setup, import, collection, or runner `ERROR` -> `INCONCLUSIVE`.
 
-**Safety features**:
-- Dry-run prevents accidental filing
-- Requires explicit approval (--approve <explicitly-approved-fingerprint> or --approve fp1 fp2)
-- Shows what would be filed before execution
+### Deduplication
 
-### Cross-Platform Support
+`scripts/transformers_deduplicate.py` checks exact fingerprints in the coverage
+record, issue bodies, and issue comments. It then searches by subject for older
+issues that predate fingerprints.
 
-**All 8 chips supported via `torch.flagos`**:
-- MUSA (Moore Threads)
-- GCU (Enflame / 燧原)
-- Ascend (Huawei)
-- MetaX
-- PPU (Stream Computing)
-- Graphcore IPU
-- Habana Gaudi
-- Cambricon MLU
+Semantic matches are emitted as `REVIEW_CANDIDATE` and blocked from filing until
+a human compares the component and mechanism. Collateral and inconclusive
+findings are also blocked.
 
-**Universal detection patterns**:
-- No "CUDA" or chip-specific keywords
-- Generic exit codes (segfault, timeout)
-- Device context poisoning flag
-- Python exception types
+### Preview generation
 
-### Simplified Skill for Weak Models
+`scripts/transformers_preview_issues.py` writes one Markdown draft per new
+finding and a consolidated preview. Drafts follow the repository AI issue
+template structure and include the captured evidence, fingerprint, isolated
+command, proposed verification, and suggested labels.
 
-**Old skill** (transformers-test): Complex multi-step instructions with decision trees
+They intentionally leave required review placeholders for:
 
-**New skill** (transformers-auto-triage): Just run 5 commands in order
+- the actual AI model;
+- complete hardware and software environment;
+- a validated minimal reproducer;
+- root-cause analysis;
+- responsible code locations;
+- human completion of the checklist.
+
+For non-CUDA-compatible operator work, proposed solutions direct contributors to
+the platform code generator rather than handwritten per-operator kernels.
+
+### Filing
+
+`scripts/transformers_file_issues.py` is a separate optional tool. It requires an
+explicit list of fingerprints, rejects non-confirmed findings, and rejects
+incomplete drafts. There is no bulk approval option.
+
+The filer reads the current `Platform` field emitted by the preview tool and
+retains compatibility with legacy drafts that used `Chip`.
+
+### Safe and automatic wrappers
+
+`scripts/transformers_auto_sweep.sh` executes the full measurement and preview
+pipeline, then prints the command shape for a later explicitly authorized filing
+action. It does not invoke the filer.
+
+`scripts/safe_transformers_wrapper.py` validates parameters before invoking that
+same report-only path. Safe mode cannot publish issues automatically.
+
+## Files
+
+### Core tooling
+
+- `scripts/transformers_triage.py`
+- `scripts/transformers_verify.py`
+- `scripts/transformers_deduplicate.py`
+- `scripts/transformers_preview_issues.py`
+- `scripts/transformers_file_issues.py`
+- `scripts/transformers_auto_sweep.sh`
+- `scripts/transformers_batch_sweep.sh`
+- `scripts/safe_transformers_wrapper.py`
+
+### Runner and tests
+
+- `tests/manual/transformers_hf_tests.py`
+- `tests/unit/test_transformers_hf_tests.py`
+- `tests/unit/test_transformers_automation.py`
+- `scripts/test_transformers_automation.py`
+
+### Documentation
+
+- `.claude/skills/transformers-test/SKILL.md`
+- `docs/design/robust-harness-proposal.md`
+- `docs/workflows/resilient-testing-quickstart.md`
+- `docs/workflows/transformers-auto-triage.md`
+- `docs/reference/hf-coverage.md`
+
+## Important Invariants
+
+1. A selected-nodeid subprocess must not also receive the architecture directory.
+2. A valid isolation rerun collects exactly one test.
+3. Completed records from a crashed batch are never overwritten.
+4. A run-level poison marker does not identify the triggering test.
+5. A passing assertion with CPU fallback is not accelerator success.
+6. Accelerator verification is serial until devices can be isolated per worker.
+7. A runner error is inconclusive, not confirmed.
+8. Semantic issue matches require review rather than automatic deduplication.
+9. Automatic and safe modes stop before GitHub writes.
+10. Publication requires complete issue content and explicit fingerprint-level
+    authorization.
+
+## Usage
+
+Run one architecture through the report-only path:
 
 ```bash
-# Step 1
-python scripts/transformers_triage.py input.json --out classified.json
-
-# Step 2
-python scripts/transformers_verify.py classified.json --out verified.json ...
-
-# Step 3
-python scripts/transformers_deduplicate.py verified.json --out new.json ...
-
-# Step 4
-python scripts/transformers_preview_issues.py new.json --chip MUSA ...
-
-# Step 5
-python scripts/transformers_file_issues.py new.json --approve <explicitly-approved-fingerprint>
+bash scripts/transformers_auto_sweep.sh qwen3 flagos "MUSA MTT S5000"
 ```
 
-Even weak models can follow this linear sequence.
-
-## Files Modified/Created
-
-### New Files (2,334 lines total)
-
-1. `scripts/transformers_triage.py` - 345 lines
-2. `scripts/transformers_verify.py` - 312 lines
-3. `scripts/transformers_deduplicate.py` - 265 lines
-4. `scripts/transformers_preview_issues.py` - 435 lines
-5. `scripts/transformers_file_issues.py` - 310 lines
-6. `scripts/test_transformers_automation.py` - 170 lines (smoke test)
-7. `.claude/skills/transformers-auto-triage/SKILL.md` - 87 lines
-8. `docs/workflows/transformers-auto-triage.md` - 410 lines
-
-### Code Quality
-
-**Linting**: All files pass `ruff check` and `ruff format --check`
-
-**Testing**: Smoke test validates all 4 main tools (verify skipped, needs real test files)
+Or run the stages individually:
 
 ```bash
-$ python scripts/test_transformers_automation.py
-✅ All tools passed smoke test!
-```
+python scripts/transformers_triage.py results.json --out classified.json
 
-## Design Decisions
-
-### Why 5 separate tools instead of 1 monolithic script?
-
-1. **Inspectability** - Can examine intermediate outputs at each stage
-2. **Resumability** - Can restart from any stage if one fails
-3. **Flexibility** - Can skip stages (e.g., skip verify for quick triage)
-4. **Testing** - Each tool can be tested independently
-
-### Why fingerprint-based deduplication?
-
-- Same operation + same error pattern = same root cause
-- Works across models (qwen3 and llama3 hitting same SDPA issue share fingerprint)
-- Stable across runs (same fingerprint even if test count changes)
-
-### Why serial verification?
-
-- Separate Python processes can still share one accelerator and memory pool.
-- Concurrent failures can contaminate results or cause resource interference.
-- Serial fresh-process reruns are slower but provide defensible isolation evidence.
-- Parallel verification is deferred until the tool can pin each worker to a genuinely isolated device.
-
-### Why skip GitHub search option?
-
-- GitHub API is slow (~2s per search)
-- For testing/development, baseline-only is sufficient
-- Can always rerun with GitHub search enabled later
-
-## Usage Examples
-
-### Complete workflow for new model
-
-```bash
-MODEL=qwen3
-CHIP=MUSA
-TF_VERSION=4.47.0
-
-# 1. Run transformers tests (separate step, not in pipeline)
-pytest tests/transformers/models/${MODEL} --json-report --json-report-file=~/test-results/${MODEL}.json
-
-# 2. Triage
-python scripts/transformers_triage.py \
-  ~/test-results/${MODEL}.json \
-  --out /tmp/${MODEL}-classified.json
-
-# 3. Verify (serial)
 python scripts/transformers_verify.py \
-  /tmp/${MODEL}-classified.json \
-  --out /tmp/${MODEL}-verified.json \
-  --test-source-dir tests/transformers/models/${MODEL} \
-  --workers 1
+    classified.json \
+    --out verified.json \
+    --test-source-dir /root/.cache/torch_fl/hf-tests \
+    --transformers-version 5.16.1 \
+    --workers 1
 
-# 4. Deduplicate
 python scripts/transformers_deduplicate.py \
-  /tmp/${MODEL}-verified.json \
-  --out /tmp/${MODEL}-new.json \
-  --coverage-file docs/reference/hf-coverage.md \
-  --repo flagos-ai/Torch-FL
+    verified.json \
+    --out new.json \
+    --coverage-file docs/reference/hf-coverage.md \
+    --repo flagos-ai/Torch-FL
 
-# 5. Preview
 python scripts/transformers_preview_issues.py \
-  /tmp/${MODEL}-new.json \
-  --chip ${CHIP} \
-  --transformers-version ${TF_VERSION} \
-  --torch-fl-commit $(git rev-parse --short HEAD) \
-  --out /tmp/${MODEL}-preview.md
-
-# 6. Review
-cat /tmp/${MODEL}-preview.md
-
-# 7. File all
-python scripts/transformers_file_issues.py \
-  /tmp/${MODEL}-new.json \
-  --approve <explicitly-approved-fingerprint> \
-  --repo flagos-ai/Torch-FL
+    new.json \
+    --chip "MUSA MTT S5000" \
+    --transformers-version 5.16.1 \
+    --torch-fl-commit "$(git rev-parse --short HEAD)" \
+    --issue-bodies-dir /tmp/qwen3-issues \
+    --out /tmp/qwen3-preview.md
 ```
 
-### Dry run (safe testing)
+After reviewing and completing specific drafts, an explicitly authorized set can
+be filed with:
 
 ```bash
 python scripts/transformers_file_issues.py \
-  /tmp/qwen3-new.json \
-  --approve <explicitly-approved-fingerprint> \
-  --dry-run
+    new.json \
+    --issue-bodies-dir /tmp/qwen3-issues \
+    --approve <fingerprint> [<fingerprint> ...] \
+    --repo flagos-ai/Torch-FL
 ```
 
-### File specific issues only
+## Verification
+
+The focused automated checks are:
 
 ```bash
-python scripts/transformers_file_issues.py \
-  /tmp/qwen3-new.json \
-  --approve a1b2c3d4e5f6 b2c3d4e5f6g7 c3d4e5f6g7h8
+ruff check
+ruff format --check
+pytest tests/unit/test_transformers_hf_tests.py \
+       tests/unit/test_transformers_automation.py -q
+python scripts/test_transformers_automation.py
+bash -n scripts/transformers_auto_sweep.sh \
+        scripts/transformers_batch_sweep.sh
 ```
 
-## Testing
+The smoke test covers triage, deduplication, and preview generation. Filing is
+excluded because generated drafts are incomplete until human review and explicit
+authorization.
 
-### Smoke Test
+## Hardware Evidence
 
-Basic validation that all tools work with minimal data:
+The qwen3 MUSA investigation that motivated the hardening demonstrated why the
+invariants matter:
 
-```bash
-$ python scripts/test_transformers_automation.py
-Transformers Automation Pipeline - Smoke Test
-============================================================
-✅ transformers_triage succeeded
-✅ transformers_deduplicate succeeded
-✅ transformers_preview_issues succeeded
-✅ transformers_file_issues succeeded
+- the original selector shape reran the architecture directory rather than one
+  nodeid;
+- corrected one-nodeid subprocesses separated five cause groups from 20 failure
+  occurrences;
+- failures included a model-parallel illegal memory access, non-contiguous
+  softmax restrictions, ProcessGroupGloo's device gap, a CUDA-only
+  TorchInductor/Triton dependency, and mudnn INT64 true division;
+- a complete CPU-fallback inventory still requires a hardware rerun with the new
+  `FLAGOS_LOG_FALLBACK=1` instrumentation.
 
-✅ All tools passed smoke test!
-```
+The corrected evidence and associated issue references are recorded in
+`docs/reference/hf-coverage.md`.
 
-### Real-World Testing
+## Trade-offs and Follow-up
 
-Tested with actual qwen3 test results (from PR #247):
-- 847 total tests
-- 327 failures
-- 68 classified findings
-- 15 new issues after deduplication
-
-## Future Enhancements
-
-### Short-term
-1. Add `--model` auto-detection from test paths
-2. Support multiple chip types in one run (compare results)
-3. Add progress bars for long-running stages
-
-### Medium-term
-1. Integration with CI/CD for issue preview generation
-2. Historical trend analysis (issue rate over time)
-3. Smart retry for transient failures
-
-### Long-term
-1. Root cause clustering (group related issues)
-2. Auto-suggest fixes based on similar resolved issues
-3. Model performance comparison dashboard
-
-## Lessons Learned
-
-### What Worked Well
-
-1. **Platform-agnostic design** - No chip-specific code means zero maintenance for new chips
-2. **Fingerprinting** - Stable deduplication across runs and models
-3. **Parallel verification** - 12x speedup, biggest win
-4. **Dry-run mode** - Prevented accidental issue spam during development
-
-### What Could Be Improved
-
-1. **Verification needs real files** - Can't test in isolation without transformers test cache
-2. **GitHub API rate limits** - May need batching for large runs
-3. **Manual approval step** - Could add confidence scores for auto-approval
-
-### Design Trade-offs
-
-| Decision | Pro | Con |
-|----------|-----|-----|
-| 5 separate tools | Inspectable, resumable | More command-line arguments |
-| Fingerprint dedup | Stable, cross-model | May group unrelated issues |
-| Parallel verify | 12x faster | Uses more memory |
-| Dry-run default | Safe testing | Extra step to actually file |
-
-## Maintenance Notes
-
-### Adding New Failure Classes
-
-Edit `transformers_triage.py`:
-
-```python
-def classify_failure(test_record, run_info):
-    # Add new detection logic
-    if 'new pattern' in detail:
-        return 'NEW_CLASS', 'subject'
-    # ... existing logic
-```
-
-### Changing Issue Template
-
-Edit `transformers_preview_issues.py`:
-
-```python
-def generate_issue_body(finding, ...):
-    # Update body format
-    body = f"""
-    ## New Template Format
-    ...
-    """
-```
-
-### Adding New Chip
-
-**No code changes needed!** All tools are chip-agnostic.
-
-Just ensure:
-1. Chip uses `torch.flagos` device interface
-2. Test failures follow standard Python exception format
-
-## Conclusion
-
-Fully automated transformers test triage pipeline that:
-- ✅ Reduces manual work by 95% (120 min → 6 min)
-- ✅ Works for all 8 chips without modification
-- ✅ Simple enough for weak models to use
-- ✅ Handles all torch-fl caused failures automatically
-
-**All three original problems solved.**
-
-## Related Documentation
-
-- `.claude/skills/transformers-auto-triage/SKILL.md` - User-facing skill docs
-- `docs/workflows/transformers-auto-triage.md` - Detailed workflow guide
-- `.github/ISSUE_TEMPLATE/ai_agent_issue.md` - Issue body template
-- `docs/reference/hf-coverage.md` - Baseline records
+- Serial verification takes longer than concurrent reruns but produces stronger
+  evidence on a shared accelerator.
+- Resilient batches recover coverage after a process failure but cannot guarantee
+  that a vendor driver has reset; fresh subprocess isolation remains necessary.
+- Generated drafts reduce repetitive formatting but do not replace root-cause
+  investigation.
+- The next target-hardware run should explicitly audit the reported
+  `cpu_fallback_ops` and create findings for every measured host fallback.
