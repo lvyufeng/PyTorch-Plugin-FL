@@ -29,6 +29,7 @@ def load(name):
 
 triage = load("transformers_triage")
 verify = load("transformers_verify")
+file_issues = load("transformers_file_issues")
 
 
 def test_cpu_fallback_becomes_confirmed_operator_finding():
@@ -74,7 +75,18 @@ def test_run_level_poison_does_not_classify_every_failure_as_crash():
             ],
         }
     )
-    assert result["findings"][0]["class"] != "CRASH"
+    finding = result["findings"][0]
+    assert finding["class"] == "FEATURE_UNSUPPORTED"
+    assert finding["subject"] == "device_flagos"
+
+
+def test_issue_body_metadata_accepts_platform_and_legacy_chip_keys():
+    body = "- **Platform**: MUSA MTT S5000\n- **Transformers**: 5.16.1\n"
+    assert file_issues.extract_body_metadata(body, "Platform") == "MUSA MTT S5000"
+    assert file_issues.extract_body_metadata(body, "Transformers") == "5.16.1"
+
+    legacy = "- **Chip**: GCU S60\n"
+    assert file_issues.extract_body_metadata(legacy, "Chip") == "GCU S60"
 
 
 def test_verification_error_is_inconclusive():

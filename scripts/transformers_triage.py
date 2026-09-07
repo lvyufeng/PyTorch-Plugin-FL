@@ -67,10 +67,16 @@ def extract_feature(detail: str) -> str:
     if match:
         return match.group(1)
 
-    # "X is not supported"
+    # "X is not supported" or "unsupported device type X"
     match = re.search(r"'?(\w+)'? (?:is )?not supported", detail, re.I)
     if match:
         return match.group(1)
+
+    match = re.search(
+        r"unsupported ([\w ]+?)(?: type)? ['\"]?(\w+)['\"]?(?:\s|$)", detail, re.I
+    )
+    if match:
+        return f"{match.group(1).strip()}_{match.group(2)}"
 
     return "unknown_feature"
 
@@ -198,6 +204,7 @@ def classify_failure(test_record: Dict) -> Tuple[str, str]:
     feature_patterns = [
         r"AttributeError",
         r"not supported",
+        r"unsupported",
         r"requires.*not available",
         r"No module named",
     ]

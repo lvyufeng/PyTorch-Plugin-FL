@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -92,6 +93,16 @@ def file_github_issue(
     except Exception as e:
         print(f"Unexpected error: {e}")
         return None
+
+
+def extract_body_metadata(body_text: str, key: str) -> Optional[str]:
+    """Extract one Markdown list item such as ``- **Platform**: MUSA``."""
+    match = re.search(
+        rf"^- \*\*{re.escape(key)}\*\*: (.+)$",
+        body_text,
+        re.MULTILINE,
+    )
+    return match.group(1) if match else None
 
 
 def get_issue_labels(finding: Dict) -> List[str]:
@@ -275,19 +286,15 @@ def main():
                     # We'll construct it from finding metadata
                     break
 
-        # Get chip info from body
+        # Get platform and version metadata from the generated body.
         with open(body_file) as f:
             body_text = f.read()
-            chip_match = (
-                body_text.split("**Chip**: ")[1].split("\n")[0]
-                if "**Chip**:" in body_text
-                else "Unknown"
-            )
-            tf_version = (
-                body_text.split("**Transformers**: ")[1].split("\n")[0]
-                if "**Transformers**:" in body_text
-                else "unknown"
-            )
+            chip_match = extract_body_metadata(
+                body_text, "Platform"
+            ) or extract_body_metadata(body_text, "Chip")
+            tf_version = extract_body_metadata(body_text, "Transformers")
+            chip_match = chip_match or "Unknown"
+            tf_version = tf_version or "unknown"
 
         # Reconstruct title
         model = finding["models"][0] if finding["models"] else "unknown"
