@@ -172,6 +172,7 @@ def test_child_env_sets_hf_device_contract(monkeypatch, tmp_path):
     monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
     env = runner.child_env(tmp_path, "flagos", tmp_path / "report.jsonl", True)
     assert "TRANSFORMERS_TEST_DEVICE" not in env
+    assert env["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert env["TRANSFORMERS_TEST_DEVICE_SPEC"] == "hf_device_spec.py"
     assert env["_HF_TESTS_SOURCE"] == str(tmp_path)
     assert env["HF_HUB_OFFLINE"] == "1"
@@ -192,6 +193,36 @@ def test_pytest_command_runs_upstream_tests_unfiltered(tmp_path):
     command = runner.pytest_command(tmp_path / "tests/models/qwen3", "", [], False)
     assert command[1:3] == ["-m", "pytest"]
     assert command[3:] == [str(tmp_path / "tests/models/qwen3")]
+
+
+def test_pytest_command_does_not_union_directory_with_selected_nodeids(tmp_path):
+    target = tmp_path / "tests/models/qwen3"
+    nodeid = "tests/models/qwen3/test_modeling_qwen3.py::Qwen3ModelTest::test_one"
+    command = runner.pytest_command(target, "", [nodeid], False, include_target=False)
+    assert nodeid in command
+    assert str(target) not in command
+
+
+def test_child_env_enables_cpu_fallback_measurement(tmp_path):
+    env = runner.child_env(tmp_path, "flagos", tmp_path / "report.jsonl", False)
+    assert env["FLAGOS_LOG_FALLBACK"] == "1"
+
+
+def test_reduce_records_aggregates_cpu_fallback_operators():
+    reduced = runner.reduce_records(
+        [
+            {
+                **record("a::pass", "passed"),
+                "cpu_fallback_ops": ["aten::div", "aten::add"],
+            },
+            {
+                **record("a::pass", "passed", when="teardown"),
+                "cpu_fallback_ops": ["aten::div"],
+            },
+        ]
+    )
+    assert reduced["tests"][0]["cpu_fallback_ops"] == ["aten::add", "aten::div"]
+    assert runner.fallback_ops(reduced["tests"]) == ["aten::add", "aten::div"]
 
 
 def test_known_model_listing_delegates_to_mapping(monkeypatch):
@@ -448,6 +479,51 @@ def test_atomic_result_write(tmp_path):
 
 
 # --- all mode -----------------------------------------------------------------
+
+
+def test_resilient_crash_preserves_completed_test_results(monkeypatch, tmp_path):
+    target = tmp_path / "tests" / "models" / "qwen3"
+    target.mkdir(parents=True)
+    nodeids = [
+        "tests/models/qwen3/test.py::test_one",
+        "tests/models/qwen3/test.py::test_two",
+    ]
+    monkeypatch.setattr(runner, "test_dir", lambda source, model: target)
+    monkeypatch.setattr(
+        runner,
+        "collect_all_tests",
+        lambda model, source, args: {"tests": nodeids, "collected": 2},
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_test_batch",
+        lambda model, source, batch, args, timeout: {
+            "tests": [
+                {
+                    "nodeid": nodeids[0],
+                    "status": "FAIL",
+                    "detail": "boom",
+                    "cpu_fallback_ops": [],
+                }
+            ],
+            "collect_errors": [],
+            "collected": 2,
+            "crashed": True,
+            "returncode": -11,
+        },
+    )
+    monkeypatch.setattr(runner, "reset_device_context", lambda device: None)
+    args = runner.argparse.Namespace(
+        batch_size=2,
+        batch_timeout=30,
+        device="flagos",
+    )
+
+    result = runner.run_tests_resilient("qwen3", tmp_path, args)
+
+    statuses = {test["nodeid"]: test["status"] for test in result["tests"]}
+    assert statuses == {nodeids[0]: "FAIL", nodeids[1]: "BATCH_CRASHED"}
+    assert result["summary"] == {"FAIL": 1, "BATCH_CRASHED": 1}
 
 
 def test_all_mode_runs_each_architecture_and_writes_progressively(
