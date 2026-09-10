@@ -30,12 +30,23 @@ enum class Backend {
   kTsingMicro,
   kGcu,
   kTileOps,
+  // No accelerated implementation on this platform. The op is deliberately not
+  // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
+  // arriving here with an empty kernel slot. Recorded explicitly (rather than
+  // by omission) so a vendor conf states coverage for every op and support can
+  // be counted from the file.
+  kNone,
   kUncached
 };
 
 // Returns the backend for a given op name, loaded once from config file at startup.
 // Config file path: $FLAGOS_BACKEND_CONFIG or torch_fl/configs/backends.conf
-// Format: "op_name = backend"  (backend: "flagos" | "flaggems" | "cuda" | "metax" | "tileops")
+// Format: "op_name = backend"
+//   backend: "flaggems"     -- FlagGems Python (Triton) path
+//            "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
+//            "<vendor>"     -- vendor-native kernel (cuda | ascend | musa |
+//                              metax | gcu | tsingmicro | tileops)
+//            "none"         -- no accelerated impl; reaches cpu_fallback
 // Default when op is not listed: FlagOS.
 Backend GetBackendForOp(const std::string& op_name);
 

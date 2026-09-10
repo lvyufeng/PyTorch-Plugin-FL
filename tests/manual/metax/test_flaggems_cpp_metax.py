@@ -112,7 +112,7 @@ print("CONF=" + os.environ.get("FLAGOS_BACKEND_CONFIG", "<unset>"))
     for line in proc.stdout.splitlines():
         if line.startswith("CONF="):
             conf = line[len("CONF=") :]
-    ok = conf.endswith("backends_metax_flaggems_cpp.conf")
+    ok = conf.endswith("backends_metax.conf")
     check("CPP+boxing selects metax cpp conf", ok, conf or proc.stderr[-300:])
 
 

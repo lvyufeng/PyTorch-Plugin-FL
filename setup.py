@@ -390,7 +390,7 @@ def build_deps():
         # FLAGGEMS_PYTHON defaults ON, same as metax/cuda: DTK ships a working
         # triton (hcu backend) that flag_gems runs on, so the wheel compiles the
         # FlagGems Python-path kernels too and the choice becomes a runtime one
-        # (FLAGOS_USE_FLAGGEMS -> backends_dcu_flaggems.conf). python_op_caller
+        # (FLAGOS_USE_FLAGGEMS -> backends_dcu.conf). python_op_caller
         # links torch_python_library, already in the link set, so this adds
         # nothing to the wheel size. Set FLAGGEMS_PYTHON=0 for a slim pure-boxing
         # build; the generic pass-through below honors that.
@@ -532,7 +532,7 @@ def _write_build_config() -> None:
 
     torch_fl._select_backend_config() runs at import time, before `import torch`,
     so it cannot sniff torch.version.hip to tell a DCU build apart. Persisting
-    ACCELERATOR here lets it pick backends_dcu_flaggems.conf without the user
+    ACCELERATOR here lets it pick backends_dcu.conf without the user
     having to re-export ACCELERATOR at runtime. The env var still wins, so an
     explicit override keeps working.
     """

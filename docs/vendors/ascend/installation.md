@@ -171,16 +171,25 @@ export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
 ### Enable FlagGems at runtime
 
 ```bash
-FLAGOS_USE_FLAGGEMS=1 python -c "
+python -c "
 import torch_fl, flag_gems, torch
 x = torch.randn(64, 64, device='flagos:0')
 print('abs matches CPU:', torch.allclose(torch.abs(x).cpu(), x.cpu().abs()))
 "
 ```
 
-With `FLAGOS_USE_FLAGGEMS=1`, the runtime loads `backends_ascend_flagos_py.conf` instead of `backends_ascend.conf`. Ops that triton-ascend cannot compile are routed back to the ACLNN kernel (annotated per-op in the config).
+There is no `FLAGOS_USE_FLAGGEMS` opt-in on Ascend, and no separate
+`*_flagos_py.conf`. An Ascend build is identified by its `lib/flagos_platform`
+marker and always loads `backends_ascend.conf`, which is generated
+FlagGems-first: every routable op is listed exactly once with its resolved
+backend, ops triton-ascend cannot compile sit on `ascend` (the ACLNN kernel),
+and ops Ascend does not register at all are written `none` so they reach
+`cpu_fallback`. Reading the file tells you the whole routing.
 
-Without `FLAGOS_USE_FLAGGEMS`, all ops use the pure ACLNN backend.
+To measure the two backends against each other, collapse the table with
+`ALL_USE_FLAGGEMS=1` or `ALL_USE_VENDOR=1` (mutually exclusive). Each only moves
+an op when the target actually implements it; ops that cannot move are listed on
+stderr and stay put, so `ALL_USE_VENDOR` is partial by nature.
 
 ## Optional: torch.compile via triton-ascend
 

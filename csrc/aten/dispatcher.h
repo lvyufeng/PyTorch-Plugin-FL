@@ -56,6 +56,13 @@ class Dispatcher {
       case Backend::kTsingMicro:   tsingmicro_fn_ = fn;    break;
       case Backend::kGcu:           gcu_fn_ = fn;            break;
       case Backend::kTileOps:       tileops_fn_ = fn;        break;
+      // Neither names a kernel set, so there is no slot to fill. kNone is the
+      // conf's "no accelerated impl here" verdict; kUncached is the sentinel
+      // operator() uses before it has resolved the op. Listed explicitly rather
+      // than via default: so adding a real backend still trips -Wswitch here.
+      case Backend::kNone:
+      case Backend::kUncached:
+        break;
     }
   }
 
@@ -73,7 +80,7 @@ class Dispatcher {
     }
     LogDispatch(op_name_, backend);
     auto fn = GetFn(backend);
-    TORCH_CHECK(fn, op_name_, ": backend not registered");
+    TORCH_CHECK(fn, op_name_, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
   }
 
@@ -82,7 +89,7 @@ class Dispatcher {
     auto backend = GetBackendForOp(op_name);
     LogDispatch(op_name, backend);
     auto fn = GetFn(backend);
-    TORCH_CHECK(fn, op_name, ": backend not registered");
+    TORCH_CHECK(fn, op_name, DispatchFailureMessage(backend));
     return fn(std::forward<Args>(args)...);
   }
 
@@ -90,7 +97,20 @@ class Dispatcher {
   FnPtr GetFn(Backend device) const {
     switch (device) {
       case Backend::kCuda:          return cuda_fn_;
-      case Backend::kFlagOs:        return flagos_fn_;
+      // FlagGems' C++ runtime is only compiled in for a FLAGGEMS_KERNEL=ON
+      // build (flaggems_cpp_kernels.cc, behind FLAGOS_FLAGGEMS_CPP), which needs
+      // liboperators.so built for the vendor. A platform ships ONE conf, so the
+      // conf cannot know whether that opt-in build is the one running: MetaX's
+      // conf routes 17 ops here because a MACA-built FlagGems is worth using
+      // when present, and the same file has to stay correct when it is absent.
+      // Degrade to the boxing kernel rather than hard-failing on the empty slot.
+      // Boxing is preferred over the Python FlagGems path because these ops
+      // reach the C++ set precisely where the platform's triton backend is the
+      // weak link (metax rejects the SPLIT_K kwarg gems' bmm passes), so the
+      // Python path is not a safe substitute. Mirrors the kTileOps case below.
+      case Backend::kFlagOs:
+        if (flagos_fn_) return flagos_fn_;
+        return cuda_fn_ ? cuda_fn_ : flagos_python_fn_;
       case Backend::kFlagOsPython:  return flagos_python_fn_;
       case Backend::kAscend:        return ascend_fn_;
       case Backend::kMusa:          return musa_fn_;
@@ -105,8 +125,29 @@ class Dispatcher {
       case Backend::kTileOps:
         if (tileops_fn_) return tileops_fn_;
         return cuda_fn_ ? cuda_fn_ : flagos_fn_;
+      // "none" means the platform has no accelerated impl for this op. Codegen
+      // is expected to skip m.impl() for it so the call reaches cpu_fallback
+      // and never arrives here. Landing here means the registration and the
+      // conf disagree, so return nullptr and let the caller raise -- with a
+      // message that names the real cause (see NoneBackendMessage).
+      case Backend::kNone:
+        return nullptr;
+      case Backend::kUncached:
+        return nullptr;
     }
     return nullptr;
+  }
+
+  // Distinguishes "conf says none but the op was registered anyway" from a
+  // genuinely missing kernel. The first is a codegen/conf mismatch and the
+  // operator-support docs are the place to fix it; the second is a build gap.
+  static std::string DispatchFailureMessage(Backend backend) {
+    if (backend == Backend::kNone) {
+      return ": routed to 'none' (no accelerated impl on this platform) but the "
+             "op is registered on PrivateUse1 -- regenerate the vendor conf so "
+             "registration and routing agree";
+    }
+    return ": backend not registered";
   }
 
   static void LogDispatch(const std::string& op_name, Backend backend) {
@@ -118,14 +159,15 @@ class Dispatcher {
     const char* name;
     switch (backend) {
       case Backend::kCuda:          name = "cuda"; break;
-      case Backend::kFlagOs:        name = "flagos"; break;
-      case Backend::kFlagOsPython:  name = "flagos_python"; break;
+      case Backend::kFlagOs:        name = "flaggems_cpp"; break;
+      case Backend::kFlagOsPython:  name = "flaggems"; break;
       case Backend::kAscend:        name = "ascend"; break;
       case Backend::kMusa:          name = "musa"; break;
       case Backend::kMetax:         name = "metax"; break;
       case Backend::kTsingMicro:   name = "tsingmicro"; break;
       case Backend::kGcu:           name = "gcu"; break;
       case Backend::kTileOps:       name = "tileops"; break;
+      case Backend::kNone:          name = "none"; break;
       default:                           name = "unknown"; break;
     }
     fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(), name);
