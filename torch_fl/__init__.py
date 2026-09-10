@@ -117,13 +117,48 @@ def _select_backend_config() -> None:
     # check below, so it must reproduce that check's FlagGems opt-in itself --
     # otherwise an Ascend build with the marker installed would silently drop
     # FLAGOS_USE_FLAGGEMS=1 back to the native-only conf.
+    # FLAGOS_USE_VENDOR_OPS=1 is the escape hatch: use the native-kernel-only
+    # conf on any platform regardless of other switches.  It is the moral
+    # inverse of the old FLAGOS_USE_FLAGGEMS (which is kept as a no-op alias
+    # for backward compatibility -- setting it no longer changes anything
+    # because FlagGems is now the default).
+    use_vendor_ops = os.environ.get("FLAGOS_USE_VENDOR_OPS", "0") not in (
+        "0",
+        "",
+        "off",
+        "OFF",
+        "false",
+        "FALSE",
+    )
+
     marker = os.path.join(os.path.dirname(__file__), "lib", "flagos_platform")
     if os.path.exists(marker):
         with open(marker) as f:
             platform = f.read().strip().lower()
-        platform_name = f"backends_{platform}"
-        if platform in ("musa", "ascend") and use_flaggems:
-            platform_name = f"backends_{platform}_flagos_py"
+        if use_vendor_ops:
+            # Explicit vendor-only request: pure native config, no FlagGems.
+            platform_name = f"backends_{platform}"
+        elif platform == "musa":
+            # FlagGems-first only when the flag_gems package is actually
+            # installed.  CI containers and minimal deployments may ship the
+            # mudnn wheel without Triton/FlagGems; routing to flagos_python
+            # there raises "backend not registered" for every affected op.
+            import importlib.util
+
+            fg_conf = os.path.join(
+                os.path.dirname(__file__), "configs", "backends_musa_flaggems.conf"
+            )
+            if (
+                os.path.exists(fg_conf)
+                and importlib.util.find_spec("flag_gems") is not None
+            ):
+                os.environ["FLAGOS_BACKEND_CONFIG"] = fg_conf
+                return
+            platform_name = "backends_musa"
+        elif platform == "ascend" and use_flaggems:
+            platform_name = "backends_ascend_flagos_py"
+        else:
+            platform_name = f"backends_{platform}"
         platform_conf = os.path.join(
             os.path.dirname(__file__), "configs", f"{platform_name}.conf"
         )
@@ -491,14 +526,28 @@ def _install_musa_flaggems_compat() -> None:
     provide only the small compatibility surface required during FlagGems
     discovery. The actual tensor device remains ``flagos``.
     """
-    if _build_accelerator() != "musa" or os.environ.get(
-        "FLAGOS_USE_FLAGGEMS", "0"
-    ).lower() in ("0", "", "off", "false"):
+    if _build_accelerator() != "musa":
+        return
+    # FlagGems is the default routing on MUSA, so the shim installs whenever
+    # FlagGems is actually importable. It stays off for a vendor-only run and
+    # for an install that ships no flag_gems, matching the conf chosen by
+    # _select_backend_config().
+    if os.environ.get("FLAGOS_USE_VENDOR_OPS", "0") not in (
+        "0",
+        "",
+        "off",
+        "OFF",
+        "false",
+        "FALSE",
+    ):
         return
 
     import importlib.machinery
     import importlib.util
     import types
+
+    if importlib.util.find_spec("flag_gems") is None:
+        return
 
     musa = types.ModuleType("torch.musa")
     for name in (
