@@ -84,12 +84,10 @@ std::string LowerStr(std::string s) {
 // Maps a conf/env backend name to its enum slot. Returns false for an
 // unrecognized name so the caller can warn and pick its own default.
 //
-// The four names a vendor conf uses are "flaggems", "flaggems_cpp",
-// "<vendor>" and "none". Two internal enum names predate that vocabulary:
-// kFlagOs is the FlagGems C++ path ("flaggems_cpp") and kFlagOsPython is the
-// FlagGems Python path ("flaggems"). The legacy spellings "flagos",
-// "flaggems_python" and "flagos_python" stay accepted so an out-of-tree conf
-// or a pinned script keeps working.
+// The five names a vendor conf uses are "flaggems_cpp", "flaggems", "tileops",
+// "<vendor>" and "none". Legacy spellings "flagos" (for flaggems_cpp),
+// "flaggems_python" and "flagos_python" (for flaggems) stay accepted so an
+// out-of-tree conf or a pinned script keeps working.
 bool ParseBackendName(const std::string& raw, Backend* out) {
   const std::string val = LowerStr(raw);
   if (val == "cuda") {
@@ -107,10 +105,10 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
   } else if (val == "tileops") {
     *out = Backend::kTileOps;
   } else if (val == "flaggems_cpp" || val == "flagos") {
-    *out = Backend::kFlagOs;
+    *out = Backend::kFlagGemsCpp;
   } else if (val == "flaggems" || val == "flaggems_python" ||
              val == "flagos_python") {
-    *out = Backend::kFlagOsPython;
+    *out = Backend::kFlagGems;
   } else if (val == "none") {
     *out = Backend::kNone;
   } else {
@@ -122,8 +120,8 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
 const char* BackendName(Backend b) {
   switch (b) {
     case Backend::kCuda:         return "cuda";
-    case Backend::kFlagOs:       return "flaggems_cpp";
-    case Backend::kFlagOsPython: return "flaggems";
+    case Backend::kFlagGemsCpp:  return "flaggems_cpp";
+    case Backend::kFlagGems:     return "flaggems";
     case Backend::kAscend:       return "ascend";
     case Backend::kMusa:         return "musa";
     case Backend::kMetax:        return "metax";
@@ -145,7 +143,7 @@ const char* BackendName(Backend b) {
 // duplicating every op. Duplicating was the previous arrangement and it
 // silently rotted: the Ascend baseline grew to 223 ops via codegen while the
 // hand-maintained hybrid conf stayed at 55, so 168 ops fell through to
-// Backend::kFlagOs -- which has no kernel registered in an Ascend build,
+// Backend::kFlagGemsCpp -- which has no kernel registered in an Ascend build,
 // surfacing as "<op>: backend not registered" at runtime. The generated vendor
 // confs now state all four keys per op directly and need no include.
 //
@@ -214,8 +212,8 @@ void ParseConfigInto(const std::string& path,
     if (ParseBackendName(val, &parsed)) {
       table[op] = parsed;
     } else {
-      fprintf(stderr, "[flagos] unknown backend '%s' for op '%s', using flagos\n", val.c_str(), op.c_str());
-      table[op] = Backend::kFlagOs;
+      fprintf(stderr, "[flagos] unknown backend '%s' for op '%s', using flaggems\n", val.c_str(), op.c_str());
+      table[op] = Backend::kFlagGems;
     }
 
     Backend annotated;
@@ -235,7 +233,7 @@ bool EnvIsOn(const char* name) {
 }
 
 bool IsFlagGems(Backend b) {
-  return b == Backend::kFlagOs || b == Backend::kFlagOsPython;
+  return b == Backend::kFlagGemsCpp || b == Backend::kFlagGems;
 }
 
 // ALL_USE_FLAGGEMS=1 / ALL_USE_VENDOR=1 collapse the whole table onto one
@@ -379,7 +377,7 @@ const std::unordered_map<std::string, Backend>& BackendTable() {
 Backend GetBackendForOp(const std::string& op_name) {
   const auto& table = BackendTable();
   auto it = table.find(op_name);
-  return it != table.end() ? it->second : Backend::kFlagOs;
+  return it != table.end() ? it->second : Backend::kFlagGems;
 }
 
 } // namespace at::native::flagos

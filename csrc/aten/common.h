@@ -22,8 +22,8 @@ namespace at::native::flagos {
 // Keep it last so the real backends stay contiguous.
 enum class Backend {
   kCuda,
-  kFlagOs,
-  kFlagOsPython,
+  kFlagGemsCpp,    // FlagGems C++ runtime (liboperators.so, conf key: flaggems_cpp)
+  kFlagGems,       // FlagGems Python/Triton path (conf key: flaggems)
   kAscend,
   kMusa,
   kMetax,
@@ -42,12 +42,13 @@ enum class Backend {
 // Returns the backend for a given op name, loaded once from config file at startup.
 // Config file path: $FLAGOS_BACKEND_CONFIG or torch_fl/configs/backends.conf
 // Format: "op_name = backend"
-//   backend: "flaggems"     -- FlagGems Python (Triton) path
-//            "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
+//   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
+//            "flaggems"     -- FlagGems Python (Triton) path
+//            "tileops"      -- TileOps Triton shims
 //            "<vendor>"     -- vendor-native kernel (cuda | ascend | musa |
-//                              metax | gcu | tsingmicro | tileops)
+//                              metax | gcu | tsingmicro)
 //            "none"         -- no accelerated impl; reaches cpu_fallback
-// Default when op is not listed: FlagOS.
+// Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);
 
 // Memory guard to ensure proper synchronization when accessing device memory

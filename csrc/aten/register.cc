@@ -437,7 +437,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // without a kernel behind it turns into the dispatcher's "backend not
   // registered" error, whereas leaving it unregistered reaches the cpu_fallback
   // below. FlagGems Python kernels are compiled alongside GCU, but only wrappers
-  // in this coverage set may select their kFlagOsPython dispatcher slot.
+  // in this coverage set may select their kFlagGems dispatcher slot.
   //
   // MUSA is the same story: musa_register.inc lists exactly the ops with a mudnn
   // kernel behind them, and no CUDA boxing kernels are compiled in
@@ -463,7 +463,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #include "backends/musa/generated/musa_register.inc"
     #endif
     // Registered unconditionally: backends_musa.conf routes ops to FlagGems by
-    // default, so these kFlagOsPython dispatcher slots must exist or those
+    // default, so these kFlagGems dispatcher slots must exist or those
     // routes raise "backend not registered". Gating them on an opt-in env var
     // was correct only while the default conf was mudnn-only.
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
