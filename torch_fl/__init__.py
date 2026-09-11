@@ -55,7 +55,7 @@ def _select_backend_config() -> None:
     flags used to select is already in the file the platform reads.
 
     Which entry point an op actually takes is then decided by what got compiled
-    in, not by which file was read. flaggems_cpp is Backend::kFlagOs and needs
+    in, not by which file was read. flaggems_cpp is Backend::kFlagGemsCpp and needs
     FLAGGEMS_KERNEL=ON (liboperators.so built for the vendor); tileops is
     Backend::kTileOps and needs TILEOPS_KERNEL=ON plus an SM90 device. Where the
     slot is empty Dispatcher::GetFn degrades to the boxing kernel rather than
@@ -70,7 +70,7 @@ def _select_backend_config() -> None:
     memory and MetaX C550 provides 65536 (mcErrorInvalidValue at launch), so they
     stay on the cuda boxing kernel. Those 15 need a FlagGems built for MACA (cpp/
     -DFLAGGEMS_BACKEND=MACA) linked in; without it Dispatcher::GetFn sees an empty
-    kFlagOs slot and boxes them, which is why one file is safe for both builds.
+    kFlagGemsCpp slot and boxes them, which is why one file is safe for both builds.
 
     Native-kernel vendors (musa, ascend, gcu, tsingmicro) do not take part in that
     choice; each takes backends_<platform>.conf directly. For musa, ascend and gcu

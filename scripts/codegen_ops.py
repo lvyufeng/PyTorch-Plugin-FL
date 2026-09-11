@@ -2358,7 +2358,7 @@ def main():
     print(f"   generated {len(op_info)} kernels")
 
     # ---- flaggems_python_kernels.cc ----
-    # FlagGems Python-path kernels (Backend::kFlagOsPython slot) for the ops
+    # FlagGems Python-path kernels (Backend::kFlagGems slot) for the ops
     # auto-discovered by discover_flaggems_ops(). The whole file body is
     # guarded by FLAGOS_FLAGGEMS_PYTHON so it is a no-op unless the build sets
     # -DFLAGOS_FLAGGEMS_PYTHON (FLAGGEMS_PYTHON=ON), keeping non-flaggems builds
@@ -2402,7 +2402,7 @@ def main():
         pkn = python_kernel_name(i["fn_type"])
         lines.append(
             f"REGISTER_IMPL_TO_DISPATCHER({i['fn_type']}, {i['dispatcher']}, "
-            f"Backend::kFlagOsPython, {pkn})"
+            f"Backend::kFlagGems, {pkn})"
         )
     lines.append("")
     lines.append("} // namespace at::native::flagos")

@@ -24,7 +24,7 @@ gen_vendor_confs.py consumes these as the *ceiling* on what a conf may claim;
 each platform then intersects them with its own PrivateUse1 registration set.
 """
 
-# Ops flag_gems exposes on its Python/Triton path (Backend::kFlagOsPython).
+# Ops flag_gems exposes on its Python/Triton path (Backend::kFlagGems).
 # Measured on CUDA, so this is a ceiling and not a per-platform routing set.
 FLAGGEMS_PYTHON_OPS = frozenset({
     "_adaptive_avg_pool2d", "_batch_norm_no_update", "_conj",
@@ -144,7 +144,7 @@ FLAGGEMS_PYTHON_OPS = frozenset({
     "xlogy.Scalar_Self", "xlogy.Tensor", "zero_", "zeros", "zeros_like",
 })  # fmt: skip
 
-# Ops flag_gems' C++ runtime (liboperators.so) implements (Backend::kFlagOs).
+# Ops flag_gems' C++ runtime (liboperators.so) implements (Backend::kFlagGemsCpp).
 # A strict subset of FLAGGEMS_PYTHON_OPS: the C++ path only changes the entry
 # point, so withholding it never costs operator coverage.
 FLAGGEMS_CPP_OPS = frozenset({

@@ -21,8 +21,8 @@ one file per platform instead of diffing sparse configs against each other.
 
 Each op maps to exactly one of five keys:
 
-    flaggems_cpp   FlagGems C++ path (liboperators.so), Backend::kFlagOs
-    flaggems       FlagGems Python/Triton path, Backend::kFlagOsPython
+    flaggems_cpp   FlagGems C++ path (liboperators.so), Backend::kFlagGemsCpp
+    flaggems       FlagGems Python/Triton path, Backend::kFlagGems
     tileops        TileOps Python shim path, Backend::kTileOps
     <vendor>       vendor-native kernel (musa, ascend, gcu, metax, ...)
     none           no accelerated impl on this platform -> cpu_fallback
@@ -45,7 +45,7 @@ have a TileOps shim implementation are inlined in TILEOPS_OPS below.
 of the full-coverage shape: "absent from the file" and "known to be
 unsupported" used to look identical, which made support impossible to count
 and let sparse confs rot silently against a growing codegen. Omission is not
-even a safe way to say "unsupported" -- GetBackendForOp() returns kFlagOs on a
+even a safe way to say "unsupported" -- GetBackendForOp() returns kFlagGemsCpp on a
 table miss, so an unlisted op claims a FlagGems kernel by default.
 
 What the file may claim is bounded by what the platform registers on
@@ -157,7 +157,7 @@ CSRC_DIR = REPO_ROOT / "csrc/aten"
 
 # Which generated confs may route to `flaggems_cpp` at all.
 #
-# That slot is Backend::kFlagOs, registered in csrc/aten/flaggems_cpp_kernels.cc
+# That slot is Backend::kFlagGemsCpp, registered in csrc/aten/flaggems_cpp_kernels.cc
 # behind `#ifdef FLAGOS_FLAGGEMS_CPP`, which csrc/CMakeLists.txt defines only for
 # a FLAGGEMS_KERNEL=ON build -- and CMakeLists.txt force-sets FLAGGEMS_KERNEL OFF
 # for ascend, dcu, musa, bpu, tsingmicro and non-boxing metax, because the path
@@ -166,7 +166,7 @@ CSRC_DIR = REPO_ROOT / "csrc/aten"
 # One platform now means one conf, so a conf can no longer be reserved for the
 # opt-in build that compiles the slot: backends_metax.conf is what every MetaX
 # build reads, with or without FLAGGEMS_KERNEL=ON. The key stays legal there
-# because Dispatcher::GetFn (csrc/aten/dispatcher.h) degrades kFlagOs to the
+# because Dispatcher::GetFn (csrc/aten/dispatcher.h) degrades kFlagGemsCpp to the
 # boxing kernel when the slot is empty, instead of raising "backend not
 # registered". So the 17 measured C++ routes are used when a MACA-built FlagGems
 # is present and silently box when it is not -- one file, both builds.
@@ -252,7 +252,7 @@ def parse_conf(path: Path) -> dict:
 
 
 def flaggems_python_ops(conf_dir: Path = None) -> set:
-    """Ops FlagGems covers through its Python/Triton path (Backend::kFlagOsPython).
+    """Ops FlagGems covers through its Python/Triton path (Backend::kFlagGems).
 
     `conf_dir` is accepted and ignored: this used to parse the `flagos_python`
     entries out of backends_flaggems.conf. That file existed only to carry this
@@ -263,7 +263,7 @@ def flaggems_python_ops(conf_dir: Path = None) -> set:
 
 
 def flaggems_cpp_ops(conf_dir: Path = None) -> set:
-    """Ops FlagGems covers through its C++ runtime (liboperators.so, kFlagOs).
+    """Ops FlagGems covers through its C++ runtime (liboperators.so, kFlagGemsCpp).
 
     Same story as flaggems_python_ops(): formerly the `flagos` entries of
     backends_flaggems_cpp.conf, now data.

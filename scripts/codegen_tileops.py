@@ -25,7 +25,7 @@ Reads ``tileops/manifest/*.yaml`` plus the hand-maintained tables in
   - ``tests/integration/ops/test_tileops_generated.py``  numeric + dispatch tests
 
 Routes reach aten through the C++ dispatcher on ``Backend::kTileOps``, the same
-way FlagGems' Python ops reach it on ``kFlagOsPython`` (see
+way FlagGems' Python ops reach it on ``kFlagGems`` (see
 ``csrc/aten/generated/flaggems_python_kernels.cc``). The kernels themselves stay
 in Python -- TileOPs ships no C++ API -- so each generated stub calls back into
 ``torch_fl.tileops.generated.shims`` via ``CallPythonOp_Generic``.
