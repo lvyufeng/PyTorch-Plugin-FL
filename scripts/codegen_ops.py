@@ -2653,6 +2653,10 @@ def main():
             # MetaX must preserve PyTorch's lazy conjugate bit. FlagGems' _conj
             # path materializes the value instead of returning a conjugate view.
             "_conj",
+            # The MetaX FlagGems C++ sort path corrupts the profiler workload;
+            # keep sort on CUDA boxing until its activity handling is fixed.
+            "sort",
+            "sort.stable",
             # flag_gems ops that guard on device.type == "cuda" (recurse or raise
             # on the flagos device); route to cuda boxing instead of flagos_python.
             # (mul.Tensor and friends come in via flaggems_recursive_fallback.)
