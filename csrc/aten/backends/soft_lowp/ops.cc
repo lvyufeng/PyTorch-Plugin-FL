@@ -244,6 +244,14 @@ at::Tensor AddmmImpl(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     c10::ScalarType out_dtype) {
+  // Some composite callers (notably linear_out) can reach this helper after
+  // their own boxing/decomposition even when the matrix operands are ordinary
+  // dtypes. Keep that path on a fused backend instead of applying the
+  // low-precision-only validation below.
+  if (!HasLowpInput(mat1) && !HasLowpInput(mat2)) {
+    return addmm_dispatcher.DispatchBackend(
+        Backend::kCuda, self, mat1, mat2, beta, alpha);
+  }
   CheckMatrixInputs(mat1, mat2);
   auto bias = self;
   CheckDevice(bias, "addmm");
