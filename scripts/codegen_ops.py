@@ -2054,7 +2054,8 @@ def gen_wrapper(op, fn_type, dispatcher, ret_type, args):
         )
         body = (
             "#if defined(FLAGOS_SOFT_LOWP)\n"
-            f"  if ({checks}) {{\n"
+            "  if (!at::native::flagos::soft_lowp::IsDispatchSuppressed() &&\n"
+            f"      ({checks})) {{\n"
             f"    return {_SOFT_LOWP_DIRECT_CALLS[op]};\n"
             "  }\n"
             "#endif\n" + body

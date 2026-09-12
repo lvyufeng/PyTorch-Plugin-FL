@@ -29,6 +29,24 @@
 #include "../../../include/flagos.h"
 
 namespace at::native::flagos::soft_lowp {
+
+namespace {
+thread_local bool dispatch_suppressed = false;
+}
+
+bool IsDispatchSuppressed() {
+  return dispatch_suppressed;
+}
+
+DispatchSuppressionGuard::DispatchSuppressionGuard()
+    : previous_(dispatch_suppressed) {
+  dispatch_suppressed = true;
+}
+
+DispatchSuppressionGuard::~DispatchSuppressionGuard() {
+  dispatch_suppressed = previous_;
+}
+
 namespace {
 
 at::Tensor DecodeFp4Nibbles(const at::Tensor& raw) {
@@ -233,12 +251,10 @@ at::Tensor AddmmImpl(
   }
   auto lhs = DecodeIfNeeded(mat1, false);
   auto rhs = DecodeIfNeeded(mat2, true);
-  // Do not call addmm here: the decoded BF16 tensors re-enter WrapperAddmm,
-  // whose low-precision gate is bypassed and whose configured addmm backend can
-  // call this implementation again. Compose the operation from mm + scalar
-  // arithmetic instead; mm is already boxed for the decoded MetaX tensors.
-  auto product = at::mm(lhs, rhs);
-  auto result = at::add(at::mul(bias, beta), at::mul(product, alpha));
+  // Preserve one fused addmm operation. Suppress only the generated soft-lowp
+  // gate while the decoded tensors enter the configured backend implementation.
+  DispatchSuppressionGuard guard;
+  auto result = at::addmm(bias, lhs, rhs, beta, alpha);
   const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
   return output_dtype == result.scalar_type() ? result : result.to(output_dtype);
 }
