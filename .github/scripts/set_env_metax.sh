@@ -157,15 +157,34 @@ PY
   done
 
   if [[ -z "$VENDOR_FLAGGEMS_ROOT" ]]; then
-    echo "::error::FlagGems (flag_gems) was not found in the image. The MetaX" \
-         "backend requires FlagGems because backends_metax.conf routes 451 ops to" \
-         "the Python FlagGems path. Searched /opt/conda, /opt/vendor-torch, /usr" \
-         "and /usr/local interpreters."
-    exit 1
+    echo "FlagGems not found in vendor interpreters. Installing from source..."
+    # FlagGems is not available on PyPI. Install from GitHub.
+    # Use a pinned ref for reproducibility (matching the baseline from docs/reference/operator-support.md).
+    python -m pip install --no-deps git+https://github.com/FlagOpen/FlagGems.git@7fb49bad
+
+    # After installation, resolve the package location in the venv itself
+    VENDOR_FLAGGEMS_ROOT="$(python - <<'PY'
+import importlib.util
+from pathlib import Path
+spec = importlib.util.find_spec("flag_gems")
+if spec is None or not spec.submodule_search_locations:
+    print("")
+else:
+    root = Path(next(iter(spec.submodule_search_locations))).resolve()
+    print(root if (root / "__init__.py").is_file() else "")
+PY
+)"
+
+    if [[ -z "$VENDOR_FLAGGEMS_ROOT" ]]; then
+      echo "::error::Failed to install FlagGems from source. The MetaX backend" \
+           "requires FlagGems because backends_metax.conf routes 451 ops to the" \
+           "Python FlagGems path."
+      exit 1
+    fi
   fi
 
-  # Link the resolved flag_gems root
-  if [[ ! -e "$VENV_SITE/flag_gems" ]]; then
+  # Link the resolved flag_gems root (if from vendor) or use directly (if pip installed)
+  if [[ ! -e "$VENV_SITE/flag_gems" && "$VENDOR_FLAGGEMS_ROOT" != "$VENV_SITE"* ]]; then
     ln -s "$VENDOR_FLAGGEMS_ROOT" "$VENV_SITE/flag_gems"
   fi
   # Link dist-info metadata if it exists alongside the package (for non-editable installs)
