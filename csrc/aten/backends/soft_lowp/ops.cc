@@ -11,9 +11,11 @@
 #include <ATen/Dispatch.h>
 #include <ATen/ops/bitwise_and.h>
 #include <ATen/ops/bitwise_right_shift.h>
+#include <ATen/ops/add.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/eq.h>
+#include <ATen/ops/mul.h>
 #include <ATen/ops/exp2.h>
 #include <ATen/ops/mm.h>
 #include <ATen/ops/ne.h>
@@ -231,7 +233,12 @@ at::Tensor AddmmImpl(
   }
   auto lhs = DecodeIfNeeded(mat1, false);
   auto rhs = DecodeIfNeeded(mat2, true);
-  auto result = at::addmm(bias, lhs, rhs, beta, alpha);
+  // Do not call addmm here: the decoded BF16 tensors re-enter WrapperAddmm,
+  // whose low-precision gate is bypassed and whose configured addmm backend can
+  // call this implementation again. Compose the operation from mm + scalar
+  // arithmetic instead; mm is already boxed for the decoded MetaX tensors.
+  auto product = at::mm(lhs, rhs);
+  auto result = at::add(at::mul(bias, beta), at::mul(product, alpha));
   const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
   return output_dtype == result.scalar_type() ? result : result.to(output_dtype);
 }
