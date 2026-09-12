@@ -2643,9 +2643,11 @@ def main():
             "bmm",
             "bmm.out",
             "mean.dim",
-            # MetaX Triton cannot lower the bf16 scalar-div path: FlagGems
-            # promotes the scalar to f64, then the compiler rejects f64 -> bf16.
+            # MetaX Triton cannot lower the bf16 scalar-div path: the
+            # scalar is normalized to a tensor overload, FlagGems promotes it
+            # to f64, then the compiler rejects f64 -> bf16.
             "div.Scalar",
+            "div.Tensor",
             # flag_gems ops that guard on device.type == "cuda" (recurse or raise
             # on the flagos device); route to cuda boxing instead of flagos_python.
             # (mul.Tensor and friends come in via flaggems_recursive_fallback.)
