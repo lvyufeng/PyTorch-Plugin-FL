@@ -86,7 +86,7 @@ PY
 
 # Expose the vendor Triton (triton-metax) and FlagGems to the CPU torch venv.
 # torch.compile needs Triton: the active torch is the CPU wheel, which ships no
-# Triton, so inductor raises TritonMissing without this. FlagGems is needed
+# Triton, so inductor raises TritonMissing without this. FlagGems is required
 # because backends_metax.conf routes 451 ops to the Python FlagGems path by
 # default (FLAGGEMS_PYTHON=1 above compiles the dispatcher slot).
 #
@@ -99,6 +99,14 @@ PY
 # because it also relocates FlagCX; here only Triton and FlagGems are needed.
 if [[ "$CI_STAGE" == "integration" ]]; then
   VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+
+  # Install FlagGems' runtime dependencies into the venv. flag_gems imports
+  # packaging, yaml (PyYAML), sqlalchemy and numpy at or shortly after import.
+  # Use --no-deps to protect the torch ABI (same rationale as test-dependencies).
+  # numpy<2 because numpy 2.x breaks the stock +cpu torch C extensions at import
+  # (documented in set_env_musa.sh:176-178).
+  python -m pip install --no-deps 'packaging>=20.0' 'PyYAML>=5.0' 'sqlalchemy>=1.4' 'numpy>=1.20,<2.0'
+
   VENDOR_SITE=""
   for candidate in /opt/conda/lib/python3.*/site-packages \
                    /opt/vendor-torch/lib/python3.*/site-packages \
@@ -126,32 +134,55 @@ if [[ "$CI_STAGE" == "integration" ]]; then
     [[ -e "$VENV_SITE/$(basename "$metadata")" ]] || ln -s "$metadata" "$VENV_SITE/"
   done
 
-  # Link flag_gems if present
-  if [[ -d "$VENDOR_SITE/flag_gems" ]]; then
-    if [[ ! -e "$VENV_SITE/flag_gems" ]]; then
-      ln -s "$VENDOR_SITE/flag_gems" "$VENV_SITE/flag_gems"
-    fi
-    for metadata in "$VENDOR_SITE"/flag_gems-*.dist-info; do
-      [[ -e "$metadata" ]] || continue
-      [[ -e "$VENV_SITE/$(basename "$metadata")" ]] || ln -s "$metadata" "$VENV_SITE/"
-    done
-  else
-    echo "::warning::flag_gems package not found in vendor site-packages;" \
-         "FlagGems Python path will fall back to boxing kernels."
+  # Discover flag_gems via interpreter query, not directory probe. FlagGems is
+  # normally an editable install, so there is no site-packages/flag_gems directory
+  # to test -- only a .pth file and a finder module pointing at a source tree.
+  VENDOR_FLAGGEMS_ROOT=""
+  for candidate_python in /opt/conda/bin/python3 /opt/conda/bin/python \
+                          /opt/vendor-torch/bin/python3 /opt/vendor-torch/bin/python \
+                          /usr/bin/python3 /usr/local/bin/python3; do
+    [[ -x "$candidate_python" ]] || continue
+    VENDOR_FLAGGEMS_ROOT="$("$candidate_python" - <<'PY'
+import importlib.util
+from pathlib import Path
+spec = importlib.util.find_spec("flag_gems")
+if spec is None or not spec.submodule_search_locations:
+    print("")
+else:
+    root = Path(next(iter(spec.submodule_search_locations))).resolve()
+    print(root if (root / "__init__.py").is_file() else "")
+PY
+)"
+    [[ -n "$VENDOR_FLAGGEMS_ROOT" ]] && break
+  done
+
+  if [[ -z "$VENDOR_FLAGGEMS_ROOT" ]]; then
+    echo "::error::FlagGems (flag_gems) was not found in the image. The MetaX" \
+         "backend requires FlagGems because backends_metax.conf routes 451 ops to" \
+         "the Python FlagGems path. Searched /opt/conda, /opt/vendor-torch, /usr" \
+         "and /usr/local interpreters."
+    exit 1
   fi
 
-  # Confirm the vendor Triton actually imports against the CPU torch wheel,
-  # rather than discovering it at test time.
+  # Link the resolved flag_gems root
+  if [[ ! -e "$VENV_SITE/flag_gems" ]]; then
+    ln -s "$VENDOR_FLAGGEMS_ROOT" "$VENV_SITE/flag_gems"
+  fi
+  # Link dist-info metadata if it exists alongside the package (for non-editable installs)
+  VENDOR_FLAGGEMS_PARENT="$(dirname "$VENDOR_FLAGGEMS_ROOT")"
+  for metadata in "$VENDOR_FLAGGEMS_PARENT"/flag_gems-*.dist-info; do
+    [[ -e "$metadata" ]] || continue
+    [[ -e "$VENV_SITE/$(basename "$metadata")" ]] || ln -s "$metadata" "$VENV_SITE/"
+  done
+
+  # Confirm the vendor packages actually import against the CPU torch wheel,
+  # rather than discovering failures at test time.
   python - <<'PY'
 import triton
+import flag_gems
 
 print(f"Vendor Triton: {triton.__version__} ({triton.__file__})")
-
-try:
-    import flag_gems
-    print(f"FlagGems: {flag_gems.__version__} ({flag_gems.__file__})")
-except ImportError:
-    print("FlagGems: not available (will use boxing fallback)")
+print(f"FlagGems: {flag_gems.__version__} ({flag_gems.__file__})")
 PY
 fi
 
