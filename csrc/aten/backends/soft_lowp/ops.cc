@@ -4,6 +4,7 @@
 
 #include "ops.h"
 
+#include "../../generated/ops.h"
 #include "convert.h"
 #include "format.h"
 
@@ -251,10 +252,11 @@ at::Tensor AddmmImpl(
   }
   auto lhs = DecodeIfNeeded(mat1, false);
   auto rhs = DecodeIfNeeded(mat2, true);
-  // Preserve one fused addmm operation. Suppress only the generated soft-lowp
-  // gate while the decoded tensors enter the configured backend implementation.
-  DispatchSuppressionGuard guard;
-  auto result = at::addmm(bias, lhs, rhs, beta, alpha);
+  // Preserve one fused addmm operation while bypassing the public wrapper's
+  // low-precision gate. The decoded inputs are ordinary BF16 tensors, so the
+  // configured backend dispatcher can execute the complete matrix operation
+  // without recursively re-entering this software path.
+  auto result = addmm_dispatcher(bias, lhs, rhs, beta, alpha);
   const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
   return output_dtype == result.scalar_type() ? result : result.to(output_dtype);
 }
