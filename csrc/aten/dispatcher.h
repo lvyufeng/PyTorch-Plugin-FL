@@ -110,6 +110,13 @@ class Dispatcher {
   }
 
   template <typename... Args>
+  decltype(auto) DispatchBackend(Backend backend, Args&&... args) const {
+    auto fn = GetFn(backend);
+    TORCH_CHECK(fn, op_name_, DispatchFailureMessage(backend));
+    return fn(std::forward<Args>(args)...);
+  }
+
+  template <typename... Args>
   decltype(auto) DispatchAs(const std::string& op_name, Args&&... args) const {
     auto backend = GetBackendForOp(op_name);
     LogDispatch(op_name, backend);

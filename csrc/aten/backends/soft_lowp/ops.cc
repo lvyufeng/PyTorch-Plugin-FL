@@ -256,7 +256,8 @@ at::Tensor AddmmImpl(
   // low-precision gate. The decoded inputs are ordinary BF16 tensors, so the
   // configured backend dispatcher can execute the complete matrix operation
   // without recursively re-entering this software path.
-  auto result = addmm_dispatcher(bias, lhs, rhs, beta, alpha);
+  auto result = addmm_dispatcher.DispatchBackend(
+      Backend::kCuda, bias, lhs, rhs, beta, alpha);
   const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
   return output_dtype == result.scalar_type() ? result : result.to(output_dtype);
 }
