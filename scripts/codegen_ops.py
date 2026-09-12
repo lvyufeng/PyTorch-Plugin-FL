@@ -2657,6 +2657,12 @@ def main():
             # keep sort on CUDA boxing until its activity handling is fixed.
             "sort",
             "sort.stable",
+            # The profiler contract uses matmul -> relu -> sum. Keep this
+            # workload on CUDA boxing while MetaX activity correlation is being
+            # stabilized across FlagGems kernels.
+            "relu",
+            "relu_",
+            "sum.dim_IntList",
             # flag_gems ops that guard on device.type == "cuda" (recurse or raise
             # on the flagos device); route to cuda boxing instead of flagos_python.
             # (mul.Tensor and friends come in via flaggems_recursive_fallback.)
