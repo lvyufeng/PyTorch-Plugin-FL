@@ -22,16 +22,41 @@ and the forward/backward paths that exercise both.
 Run:
     PYTHONPATH=<repo root> python tests/manual/test_dataparallel_live.py
     PYTHONPATH=<repo root> python tests/manual/test_dataparallel_live.py --devices 4
+    PYTHONPATH=<repo root> python tests/manual/test_dataparallel_live.py --no-stock-comm
 """
 
 import argparse
+import sys
 
-# torch_fl MUST be imported before torch (preloads libtorch_cuda.so).
-import torch_fl  # noqa: F401
-import torch
-import torch.nn as nn
-from torch.nn.parallel import comm
-from torch.nn.parallel.data_parallel import data_parallel
+#: The seven comm functions the extension publishes. Stock torch registers them
+#: from its CUDA build only, so a build without one (a +cpu wheel) has none of
+#: them -- see --no-stock-comm below.
+COMM_NAMES = (
+    "_broadcast_coalesced",
+    "_broadcast",
+    "_broadcast_out",
+    "_scatter",
+    "_scatter_out",
+    "_gather",
+    "_gather_out",
+)
+
+# torch_fl MUST be imported before torch (preloads libtorch_cuda.so). The one
+# exception is --no-stock-comm, which has to take the seven away *between* the
+# two imports, before torch_fl publishes them; see the flag's help text.
+NO_STOCK_COMM = "--no-stock-comm" in sys.argv
+if NO_STOCK_COMM:
+    import torch
+
+    for _name in COMM_NAMES:
+        if hasattr(torch._C, _name):
+            delattr(torch._C, _name)
+
+import torch_fl  # noqa: E402,F401
+import torch  # noqa: E402
+import torch.nn as nn  # noqa: E402
+from torch.nn.parallel import comm  # noqa: E402
+from torch.nn.parallel.data_parallel import data_parallel  # noqa: E402
 
 FAILED = []
 SKIPPED = []
@@ -68,7 +93,28 @@ def main():
         default=2,
         help="number of flagos devices to parallelise over (default: 2)",
     )
+    parser.add_argument(
+        "--no-stock-comm",
+        action="store_true",
+        help=(
+            "remove torch._C's comm layer before importing torch_fl, so the "
+            "extension has to publish the seven functions rather than replace "
+            "them -- the configuration of a +cpu stock torch, which is what "
+            "this project's CUDA, Ascend and GCU pipelines run"
+        ),
+    )
     args = parser.parse_args()
+    # The deletion already happened, above the import; if the flag and that
+    # pre-scan ever disagree, every measurement below is of the wrong module.
+    assert args.no_stock_comm == NO_STOCK_COMM, (args.no_stock_comm, NO_STOCK_COMM)
+
+    # Whether the seven came from us alone or replaced a stock implementation
+    # under them decides the rest of this run, so say which one it was before
+    # anything is measured.
+    print(
+        f"torch._C comm layer: "
+        f"{'published by torch_fl only (--no-stock-comm)' if NO_STOCK_COMM else 'stock present, replaced by torch_fl'}\n"
+    )
 
     available = torch.flagos.device_count()
     device_count = min(args.devices, available)
@@ -109,18 +155,29 @@ def main():
     # same call on cuda-labelled tensors, where the stock op still works (on PPU
     # and MetaX cuda:N is the same hardware): the chunk counts and sizes have to
     # agree, or DataParallel's forward would pick a different set of replicas.
-    cuda_x = x.to(torch.device("cuda", 0))
-    for probe_rows in (rows - 1, 1):
-        got = comm.scatter(x[:probe_rows], device_ids, None, 0)
-        stock = comm.scatter(cuda_x[:probe_rows], device_ids, None, 0)
-        check(
-            f"comm.scatter matches the C++ chunking for {probe_rows} rows "
-            f"over {device_count} devices",
-            [c.shape[0] for c in got] == [c.shape[0] for c in stock]
-            and all(c.device.type == "flagos" for c in got),
-            f"{[c.shape[0] for c in got]} chunks, same as "
-            f"{[str(c.device) for c in stock]}",
+    if NO_STOCK_COMM:
+        # This one check needs the stock C++ chunking as an oracle, and the
+        # point of --no-stock-comm is that there is none in this process: the
+        # same call on cuda-labelled tensors would go through the extension
+        # too, so it would compare our chunking with our chunking. The
+        # cuda-labelled *source* is unavailable for the same reason.
+        skip(
+            f"comm.scatter matches the C++ chunking over {device_count} devices",
+            "--no-stock-comm: no stock comm layer to compare against",
         )
+    else:
+        cuda_x = x.to(torch.device("cuda", 0))
+        for probe_rows in (rows - 1, 1):
+            got = comm.scatter(x[:probe_rows], device_ids, None, 0)
+            stock = comm.scatter(cuda_x[:probe_rows], device_ids, None, 0)
+            check(
+                f"comm.scatter matches the C++ chunking for {probe_rows} rows "
+                f"over {device_count} devices",
+                [c.shape[0] for c in got] == [c.shape[0] for c in stock]
+                and all(c.device.type == "flagos" for c in got),
+                f"{[c.shape[0] for c in got]} chunks, same as "
+                f"{[str(c.device) for c in stock]}",
+            )
 
     gathered = comm.gather(list(chunks), 0, 0)
     check(
