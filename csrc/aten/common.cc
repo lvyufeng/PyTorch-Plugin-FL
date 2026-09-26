@@ -482,6 +482,14 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype) {
   // dtype FlagGems' Ascend route could not serve across the pointwise family;
   // fp32/fp16/bf16/int64/bool all compile and run.
   return dtype == at::kDouble;
+#elif defined(USE_GCU)
+  // See the declaration in common.h for the measurement. int64 is the dtype
+  // that matters: it fails inside the compiler for every flag_gems pointwise
+  // kernel that takes one, and for remainder.Tensor it does not fail at all --
+  // it returns int32. float64 fails the same way but is deliberately left
+  // alone, because one FlagGems float64 route in the same seven-op
+  // intersection (remainder.Tensor) is correct today.
+  return dtype == at::kLong;
 #else
   // No vendor route is known to be dtype-limited in this way. MUSA's
   // FlagGems gaps are per-op (a Python-float operand against a bf16 tensor)
