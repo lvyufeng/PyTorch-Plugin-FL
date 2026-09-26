@@ -83,6 +83,7 @@ jobs:
             tests/unit/test_cupti_runtime_cbid_table.py \
             tests/unit/test_dcu_core_decoupling.py \
             tests/unit/test_dcu_env_script.py \
+            tests/unit/test_device_tracer_correlation.py \
             tests/unit/test_device_tracer_selection.py \
             tests/unit/test_env_registry.py \
             tests/unit/test_gen_vendor_confs.py \

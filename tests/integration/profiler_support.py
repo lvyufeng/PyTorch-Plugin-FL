@@ -146,14 +146,16 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     installs, nine of those ten pass; the tenth asserted a runtime ``cbid``
     argument that MSPTI has no field for, and is now its own row below.
 
-    What opening the row did *not* fix is device-time linkage: Ascend attributes
-    each kernel to the CPU op that follows its launch, so the launching operator
-    keeps ``self_device_time_total == 0.0`` and ``test_profiler_device_time_linkage``
-    fails. That is issue #425, a tracer defect, and the case declares it with a
-    platform-scoped ``xfail`` instead of a blanket one. The ``linkage`` row stays
-    True rather than being turned off, so the case reports as an XFAIL -- a
-    visible, releasable statement about a known defect -- instead of
-    disappearing into a skip.
+    Device-time linkage was the one row that did not open with them: MSPTI
+    stamped every launch with the CPU op that started *after* it, so the
+    launching operator kept ``self_device_time_total == 0.0``. That turned out
+    to be this repository's defect rather than the vendor's -- ``popCorrelation``
+    passed a null out-parameter, which CANN rejects without unwinding, leaving
+    the external-correlation stack to grow for the life of the process (issue
+    #425). With the pop fixed the launching operator owns its device events, so
+    the ``linkage`` row below is True on its measured merits and
+    ``test_profiler_device_time_linkage`` runs as an ordinary case on the Ascend
+    job instead of reporting as an XFAIL.
     """
     device = True
     runtime = device
