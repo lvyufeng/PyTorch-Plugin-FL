@@ -31,6 +31,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / ".github" / "scripts"
 LIB = SCRIPTS_DIR / "lib" / "set_env_common.sh"
+HOOKS_DIR = SCRIPTS_DIR / "hooks"
+RUNNER = SCRIPTS_DIR / "set_env.sh"
 
 SHARED_FUNCS = [
     "pip_retry",
@@ -53,7 +55,8 @@ SOURCE_LINE = 'source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"'
 
 
 def _scripts() -> list[Path]:
-    return sorted(SCRIPTS_DIR.glob("set_env_*.sh"))
+    """The per-platform hook bodies (the old script bodies)."""
+    return sorted(HOOKS_DIR.glob("set_env_*.sh"))
 
 
 def test_the_library_defines_every_shared_function():
@@ -69,10 +72,9 @@ def test_no_script_redefines_a_shared_function():
             assert not re.search(rf"^{fn}\(\) \{{", text, re.M), f"{script.name}: {fn}"
 
 
-def test_every_script_sources_the_library():
-    for script in _scripts():
-        text = script.read_text(encoding="utf-8")
-        assert SOURCE_LINE in text, script.name
+def test_the_runner_sources_the_library():
+    """One entrypoint sources the library; the hooks inherit it."""
+    assert SOURCE_LINE in RUNNER.read_text(encoding="utf-8")
 
 
 def test_the_cuda_script_still_selects_its_interpreter_per_call():
@@ -82,7 +84,7 @@ def test_the_cuda_script_still_selects_its_interpreter_per_call():
     need a different one, so every call has to name it or the wrong interpreter
     is used silently.
     """
-    text = (SCRIPTS_DIR / "set_env_cuda.sh").read_text(encoding="utf-8")
+    text = (HOOKS_DIR / "set_env_cuda.sh").read_text(encoding="utf-8")
     calls = re.findall(r"pip_retry ", text)
     prefixed = re.findall(r'PIP_RETRY_PYTHON="\$[A-Za-z_]+" pip_retry ', text)
     assert calls and len(calls) == len(prefixed), (len(calls), len(prefixed))
