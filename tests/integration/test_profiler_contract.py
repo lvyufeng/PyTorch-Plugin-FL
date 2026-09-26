@@ -30,15 +30,12 @@ from profiler_support import (
 
 pytestmark = pytest.mark.profiler
 
-# The two platforms whose matmul is measured to report no device time to the
-# operator that dispatched it, each for its own reason:
+# The one platform whose matmul is measured to report no device time to the
+# operator that dispatched it:
 #
 #   cuda    #272 moved `mm`/`bmm` from `cuda` to `flaggems`, and FlagGems' Triton
 #           matmul does not surface device time on the launching op (FlagGems
 #           issue #6223). Before that reroute the case passed on CUDA.
-#   ascend  MSPTI attributes each kernel to the CPU op that *follows* the
-#           launch, so the launcher reads 0.0 while the allocation op after it
-#           absorbs the time (issue #425).
 #
 # The condition is written down rather than left implicit because `xfail` runs
 # the test body and only absorbs the outcome -- an unconditional marker is not a
@@ -47,7 +44,14 @@ pytestmark = pytest.mark.profiler
 # assertion below under the old unconditional marker (`1 xpassed` in their
 # profiler-contract runs), so they are expected to stay green now that it
 # reports, and a regression on any of them fails the build the way it should.
-_MATMUL_DEVICE_TIME_XFAIL = detect_platform() in {"cuda", "ascend"}
+#
+# Ascend was the fourth and came off this list in #425: its tracer popped the
+# external-correlation stack with a null out-parameter, which CANN rejects
+# without unwinding, so every launch was stamped with the id pushed after it.
+# A source guard on the call shape lives in
+# tests/unit/test_device_tracer_correlation.py; the behavioural assertion is
+# this case, which now runs for real on the Ascend job.
+_MATMUL_DEVICE_TIME_XFAIL = detect_platform() == "cuda"
 
 
 @pytest.mark.anyplatform
@@ -138,8 +142,7 @@ def test_profiler_flow_events_are_paired(profile_result, profiler_capabilities):
     _MATMUL_DEVICE_TIME_XFAIL,
     reason=(
         "device time is not attributed to the launching matmul: cuda routes "
-        "mm/bmm to FlagGems (FlagGems issue #6223); Ascend attributes it to the "
-        "allocation op that follows the launch (issue #425)"
+        "mm/bmm to FlagGems (FlagGems issue #6223)"
     ),
     strict=False,
 )

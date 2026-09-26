@@ -24,7 +24,7 @@
 |---|---|---|---|---|---|---|---|---|
 | NVIDIA CUDA | `FLAGOS_ACCELERATOR=cuda` (default) | CUDA boxing over an external `libtorch_cuda.so` | Stable | Experimental (inductor GPU device registered; no CI test step) | Beta (FlagCX + NCCL fallback, DDP live-verified) | Stable (CUPTI parity) | Beta (Python + C++ dispatch paths) | Stable |
 | MetaX | `FLAGOS_ACCELERATOR=metax` | CUDA boxing via `cu-bridge` against the vendor libtorch | Stable (FP16/BF16 autocast and GradScaler measured in boxing mode) | Experimental (vendor Triton and FlagTree MetaX measured on C550; vendor Triton CI-covered) | Experimental (NCCL-shaped `mccl` fallback; not CI-covered) | Experimental (MCPTI parity measured on C550; not CI-covered) | Experimental (Python dispatch; not CI-tested on MetaX) | Stable |
-| Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Beta (MSPTI kernel/runtime/flow/memcpy events CI-covered by the shared contract; device-time linkage misattributes to the following allocation op, #425; parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 and bool `neg` routes fall back to ACLNN) | Beta |
+| Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | Stable (CI-covered ops, RNG suite) | Experimental (inductor measured on 910 against triton-ascend 3.2.0 only; **not** revalidated on FlagTree, three toolchain workarounds, serial compile, no CI step) | Experimental (HCCL fallback; architectural routing only, no collective-level CI) | Beta (MSPTI kernel/runtime/flow/memcpy events plus device-time linkage, all CI-covered by the shared contract; parity suite excluded from CI) | Beta (Python dispatch; FlagGems-first conf, float64 and bool `neg` routes fall back to ACLNN) | Beta |
 | PPU | `FLAGOS_ACCELERATOR=ppu` | Same CUDA-boxing path as NVIDIA CUDA, against the PPU's CUDA-13-compatible SDK, bundling its own libtorch | Experimental (FP16/BF16 autocast and GradScaler measured on PPU hardware, not in CI) | Not validated | Experimental (NCCL fallback via vendor-adapted `libnccl.so.2`; not CI-covered) | Not validated on this vendor's tracer | Experimental (vendor-index Triton required) | Experimental |
 | Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) | Beta (including FP16/BF16 autocast and GradScaler) | Experimental (FlagTree HCU validated on `gfx936`; not in CI) | Experimental (RCCL via DTK; all_reduce/DDP measured on 2 cards, not in CI) | Beta (parity suite runs in CI) | Beta (Python dispatch only) | Beta |
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
@@ -107,13 +107,17 @@ still out of scope — `test_profiler_parity.py` is a diff against a torch-cuda 
 only the CUDA-boxing platforms can run one — and remains excluded from CI (same file, lines
 112-117). The shared profiler *contract* does run, and the device side of it is live: MSPTI
 emits named kernel, runtime/API, flow, and (under the process-start preload above) memcpy
-activity, and the step was measured on 910 at `10 passed, 1 skipped, 1 xfailed`. The skip is
+activity, and the step was measured on 910 at `11 passed, 1 skipped`. The skip is
 `gpu_memset`, a correct-by-design consequence of routing `torch.zeros()` through
 `aclnnInplaceZero` rather than the allocator (see
-[`docs/architecture/profiler.md`](../architecture/profiler.md)). The xfail is device-time
-linkage: Ascend attributes each device event to the CPU op that follows its launch, so the
-launching operator reads zero self device time while the allocation op that follows absorbs
-it (issue #425). Distributed support recommends the FlagCX path (see
+[`docs/architecture/profiler.md`](../architecture/profiler.md)). The device-time
+linkage case is one of the eleven that assert: MSPTI used to stamp every launch with
+the id of the CPU op that started after it, which turned out to be this repository's
+defect rather than the vendor's — `popCorrelation` passed a null out-parameter, which
+CANN rejects without unwinding, so the external-correlation stack grew for the life of
+the process (issue #425). With the pop fixed, the launching
+operator owns its device events and the case asserts on this platform. Distributed support
+recommends the FlagCX path (see
 [`docs/architecture/distributed-flagcx.md`](../architecture/distributed-flagcx.md), lines
 204-208); the native HCCL fallback and the `flagos→npu` zero-copy view are architectural
 routing, not on-hardware-verified collectives (same file, lines 67-75).

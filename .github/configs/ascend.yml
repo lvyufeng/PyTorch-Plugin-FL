@@ -163,13 +163,14 @@ integration_tests:
       -v -m profiler --tb=short
 
   # Device-side contract cases run on Ascend now, not only CPU/Trace: kernel,
-  # runtime, flow, and metadata are capability rows the tracer satisfies, and
-  # the step below was measured on 910 with CANN 9.0 at "10 passed, 1 skipped,
-  # 1 xfailed" (the skip is memset, the xfail is
-  # test_profiler_device_time_linkage -- Ascend's device time is attributed to
-  # the allocation op that follows the launch rather than to the launcher,
-  # issue #425; that case's xfail is now scoped to the two platforms with a
-  # measured reason for it, cuda and ascend, where it used to be unconditional).
+  # runtime, flow, metadata and linkage are capability rows the tracer
+  # satisfies, and the step below was measured on 910 with CANN 9.0 at
+  # "11 passed, 1 skipped". The skip is memset (see below); the eleven include
+  # test_profiler_device_time_linkage, whose xfail #425 retired by fixing the
+  # tracer -- popCorrelation passed a null out-parameter, which CANN rejects
+  # without unwinding the external-correlation stack, so every launch was
+  # stamped with the id pushed after it. The marker now names cuda alone, so on
+  # this platform the case asserts rather than reporting.
   # The runtime `cbid` argument stays off: MSPTI runtime records carry the
   # vendor-resolved API name and no callback id.
   #
