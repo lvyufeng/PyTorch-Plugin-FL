@@ -54,7 +54,11 @@
 // comment in InitDataParallelComm(). The originals are captured first, and
 // every replacement delegates to its original as soon as no flagos tensor is
 // involved, so a CUDA- or CPU-placed DataParallel keeps stock behaviour
-// exactly.
+// exactly. Where the build has no CUDA comm layer to capture -- a +cpu torch,
+// which is what this project's own CUDA, Ascend and GCU pipelines install --
+// there is no original and nothing to delegate to: the seven are published
+// rather than replaced, and this layer serves every call. See
+// original_or_none().
 //
 // Two deliberate departures from torch/csrc/cuda/comm.cpp, both because the
 // device *type* is the only fixed thing here and the vendor is not:
@@ -124,6 +128,38 @@ bool any_flagos(const Tensors& tensors) {
 
 // See SetScatterScope in the header.
 thread_local bool scatter_scope = false;
+
+// The attribute `name` currently holds on torch._C, or None when there is none.
+//
+// Stock torch registers the seven comm functions from its CUDA build only
+// (torch/csrc/cuda/python_comm.cpp, reached from torch/csrc/Module.cpp under
+// USE_CUDA), so a build without it -- the +cpu wheels the CUDA, Ascend and GCU
+// pipelines of this project all install, and then hand an accelerator to
+// through torch_fl's own dispatch -- has no such attribute at all. There the
+// seven are published rather than replaced, which is the case torch_npu's
+// initCommMethods() is written for too. Note that this is per name, not a
+// decision to skip the install: skipping it would leave DataParallel with no
+// comm layer whatsoever on those builds, which is the failure this file exists
+// to fix.
+py::object original_or_none(const py::module_& m, const char* name) {
+  // Two returns rather than a ternary: py::object and py::none in one
+  // conditional makes pybind11 convert the *object* branch to py::none, which
+  // is a checked downcast and throws at runtime ("Object of type
+  // 'builtin_function_or_method' is not an instance of 'none'") the moment a
+  // stock implementation is actually present.
+  if (py::hasattr(m, name)) {
+    return m.attr(name);
+  }
+  return py::none();
+}
+
+// Whether a replacement has a stock implementation to fall back to for input it
+// is not responsible for. False on a torch build with no CUDA comm layer, where
+// the replacement is the only implementation of the name and therefore has to
+// run for every call rather than delegate.
+bool has_stock_fallback(const py::object& original) {
+  return !original.is_none();
+}
 
 // Some operations can be performed more efficiently if we're handling tensors
 // of a single type only. Adding this logic directly in the loop makes it a bit
@@ -588,14 +624,17 @@ void InitDataParallelComm() {
   auto m = py::handle(torch_C).cast<py::module>();
 
   // Captured before the rebinding below, and held by the cpp_function
-  // closures, so they live exactly as long as the replacements do.
-  const py::object orig_broadcast_coalesced = m.attr("_broadcast_coalesced");
-  const py::object orig_broadcast = m.attr("_broadcast");
-  const py::object orig_broadcast_out = m.attr("_broadcast_out");
-  const py::object orig_scatter = m.attr("_scatter");
-  const py::object orig_scatter_out = m.attr("_scatter_out");
-  const py::object orig_gather = m.attr("_gather");
-  const py::object orig_gather_out = m.attr("_gather_out");
+  // closures, so they live exactly as long as the replacements do. None when
+  // this torch build has no CUDA comm layer to capture; see
+  // original_or_none().
+  const py::object orig_broadcast_coalesced =
+      original_or_none(m, "_broadcast_coalesced");
+  const py::object orig_broadcast = original_or_none(m, "_broadcast");
+  const py::object orig_broadcast_out = original_or_none(m, "_broadcast_out");
+  const py::object orig_scatter = original_or_none(m, "_scatter");
+  const py::object orig_scatter_out = original_or_none(m, "_scatter_out");
+  const py::object orig_gather = original_or_none(m, "_gather");
+  const py::object orig_gather_out = original_or_none(m, "_gather_out");
 
   // Set the attributes, do not m.def them. module_::def passes whatever is
   // already under the name as a pybind11 *sibling*, which turns the
@@ -616,7 +655,8 @@ void InitDataParallelComm() {
           std::vector<at::Tensor>& tensors,
           const std::vector<int64_t>& devices,
           size_t buffer_size) -> py::object {
-        if (!any_flagos(tensors)) {
+        if (has_stock_fallback(orig_broadcast_coalesced) &&
+            !any_flagos(tensors)) {
           return orig_broadcast_coalesced(tensors, devices, buffer_size);
         }
         tensor_list2d outputs;
@@ -634,7 +674,7 @@ void InitDataParallelComm() {
   py::cpp_function py_broadcast(
       [orig_broadcast](
           at::Tensor& tensor, const std::vector<int64_t>& devices) -> py::object {
-        if (!is_flagos(tensor)) {
+        if (has_stock_fallback(orig_broadcast) && !is_flagos(tensor)) {
           return orig_broadcast(tensor, devices);
         }
         std::vector<at::Tensor> dst_tensors;
@@ -651,7 +691,7 @@ void InitDataParallelComm() {
   py::cpp_function py_broadcast_out(
       [orig_broadcast_out](
           at::Tensor& tensor, std::vector<at::Tensor>& out_tensors) -> py::object {
-        if (!any_flagos(out_tensors)) {
+        if (has_stock_fallback(orig_broadcast_out) && !any_flagos(out_tensors)) {
           return orig_broadcast_out(tensor, out_tensors);
         }
         {
@@ -674,7 +714,8 @@ void InitDataParallelComm() {
         // A CPU source carries no device type of its own, so the scope is the
         // only thing that can still say the target devices are flagos ones;
         // see SetScatterScope.
-        if (!is_flagos(tensor) && !scatter_scope) {
+        if (has_stock_fallback(orig_scatter) && !is_flagos(tensor) &&
+            !scatter_scope) {
           return orig_scatter(
               tensor,
               devices,
@@ -702,7 +743,8 @@ void InitDataParallelComm() {
           std::vector<at::Tensor>& out_tensors,
           int64_t dim,
           std::optional<py::object> py_streams) -> py::object {
-        if (!any_flagos(out_tensors) && !scatter_scope) {
+        if (has_stock_fallback(orig_scatter_out) && !any_flagos(out_tensors) &&
+            !scatter_scope) {
           return orig_scatter_out(
               tensor,
               out_tensors,
@@ -726,7 +768,7 @@ void InitDataParallelComm() {
           std::vector<at::Tensor>& tensors,
           int64_t dim,
           std::optional<int32_t> destination_index) -> py::object {
-        if (!any_flagos(tensors)) {
+        if (has_stock_fallback(orig_gather) && !any_flagos(tensors)) {
           return orig_gather(tensors, dim, destination_index);
         }
         at::Tensor result;
@@ -746,7 +788,8 @@ void InitDataParallelComm() {
           std::vector<at::Tensor>& tensors,
           at::Tensor& out_tensor,
           int64_t dim) -> py::object {
-        if (!any_flagos(tensors) && !is_flagos(out_tensor)) {
+        if (has_stock_fallback(orig_gather_out) && !any_flagos(tensors) &&
+            !is_flagos(out_tensor)) {
           return orig_gather_out(tensors, out_tensor, dim);
         }
         {
