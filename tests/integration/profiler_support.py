@@ -32,6 +32,7 @@ class ProfilerCapabilities:
     device: bool
     kernel: bool
     runtime: bool
+    cbid: bool
     memcpy: bool
     memset: bool
     flow: bool
@@ -134,10 +135,27 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
     """Describe public profiler features currently emitted by each tracer.
 
     The capability table is intentionally about observable behavior, not vendor
-    library names. Ascend currently exposes CPU/Trace records only in CI; all
-    other supported tracers are expected to provide kernel and runtime records.
+    library names.
+
+    Ascend was the last backend held out of the device-side rows, and it was held
+    out by a stale observation rather than by a measured gap: its row predates
+    the CANN MSPTI tracer and left device/kernel/runtime/flow/metadata False, so
+    ten of the twelve cases in tests/integration/test_profiler_contract.py
+    skipped and the two that ran could not fail. Measured on Ascend 910 with
+    CANN 9.0 and the process-start preload that .github/configs/ascend.yml
+    installs, nine of those ten pass; the tenth asserted a runtime ``cbid``
+    argument that MSPTI has no field for, and is now its own row below.
+
+    What opening the row did *not* fix is device-time linkage: Ascend attributes
+    each kernel to the CPU op that follows its launch, so the launching operator
+    keeps ``self_device_time_total == 0.0`` and ``test_profiler_device_time_linkage``
+    fails. That is issue #425, a tracer defect, and the case declares it with a
+    platform-scoped ``xfail`` instead of a blanket one. The ``linkage`` row stays
+    True rather than being turned off, so the case reports as an XFAIL -- a
+    visible, releasable statement about a known defect -- instead of
+    disappearing into a skip.
     """
-    device = platform != "ascend"
+    device = True
     runtime = device
     # Ascend memcpy interception is gated on process-start LD_PRELOAD rather
     # than on `device` above: measured on Ascend 910 with CANN 9.0, the shared
@@ -152,6 +170,23 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         device=device,
         kernel=device,
         runtime=runtime,
+        # The tracers that resolve a runtime record's identity through a vendor
+        # callback-id table also stamp that id onto the event's args (cupti,
+        # roctracer, mupti, topspti all set a `cbid`). CANN's MSPTI runtime
+        # record has no callback-id field at all -- it carries the API name the
+        # vendor already resolved -- so cann_device_tracer.cc names the event
+        # from `record->name` and the arg union is {"External id", "correlation",
+        # "thread"}. Measured with the contract's own workload on Ascend 910:
+        # 0 of 15 privateuse1_runtime events carry a placeholder name.
+        #
+        # So this is the same property reached a different way, not a gap. The
+        # property the arg protects is that distinct runtime calls stay
+        # distinguishable in the trace, and test_profiler_runtime_names_are_not_all_fallback
+        # asserts it directly on every platform. Synthesizing a cbid would mean
+        # keying it on the activity correlationId, and CANN 9.0's callback
+        # surface returns a repeated stack-address-shaped value there -- see the
+        # reproduction recorded in issue #195.
+        cbid=platform != "ascend",
         memcpy=(device and platform in {"cuda", "metax", "ppu", "musa"})
         or ascend_memcpy,
         # Ascend memset stays off even with the MSPTI preload present, and this

@@ -18,6 +18,7 @@ from collections import Counter
 
 import pytest
 
+from platform_support import detect_platform
 from profiler_support import (
     GENERIC_RUNTIME_NAMES,
     MAX_GENERIC_RUNTIME_FRACTION,
@@ -28,6 +29,25 @@ from profiler_support import (
 )
 
 pytestmark = pytest.mark.profiler
+
+# The two platforms whose matmul is measured to report no device time to the
+# operator that dispatched it, each for its own reason:
+#
+#   cuda    #272 moved `mm`/`bmm` from `cuda` to `flaggems`, and FlagGems' Triton
+#           matmul does not surface device time on the launching op (FlagGems
+#           issue #6223). Before that reroute the case passed on CUDA.
+#   ascend  MSPTI attributes each kernel to the CPU op that *follows* the
+#           launch, so the launcher reads 0.0 while the allocation op after it
+#           absorbs the time (issue #425).
+#
+# The condition is written down rather than left implicit because `xfail` runs
+# the test body and only absorbs the outcome -- an unconditional marker is not a
+# skip, it is a blanket licence to fail, and it was covering four platforms this
+# defect is not about. DCU, PPU and MUSA have each been measured passing the
+# assertion below under the old unconditional marker (`1 xpassed` in their
+# profiler-contract runs), so they are expected to stay green now that it
+# reports, and a regression on any of them fails the build the way it should.
+_MATMUL_DEVICE_TIME_XFAIL = detect_platform() in {"cuda", "ascend"}
 
 
 @pytest.mark.anyplatform
@@ -66,7 +86,16 @@ def test_profiler_runtime_events(profile_result, profiler_capabilities):
     assert runtimes, "profiler produced no privateuse1_runtime events"
     assert all(event.get("name") for event in runtimes)
     assert all(event.get("dur", 0) > 0 for event in runtimes)
-    assert "cbid" in arg_key_union(profile_result[1], "privateuse1_runtime")
+    # `cbid` is the vendor callback id, which only the tracers that resolve an
+    # id through a lookup table can stamp. CANN names MSPTI runtime records from
+    # the name the vendor already supplied, so it has no id to record -- see
+    # profiler_support.capabilities_for_platform. Require *some* argument
+    # metadata on every platform so the gate cannot degrade into asserting
+    # nothing.
+    keys = arg_key_union(profile_result[1], "privateuse1_runtime")
+    assert keys, "profiler produced privateuse1_runtime events with no arguments"
+    if profiler_capabilities.cbid:
+        assert "cbid" in keys
 
 
 @pytest.mark.profiler_device
@@ -106,7 +135,12 @@ def test_profiler_flow_events_are_paired(profile_result, profiler_capabilities):
 @pytest.mark.profiler_device
 @pytest.mark.profiler_linkage
 @pytest.mark.xfail(
-    reason="FlagGems mm/bmm don't report profiler device time (FlagGems issue #6223)",
+    _MATMUL_DEVICE_TIME_XFAIL,
+    reason=(
+        "device time is not attributed to the launching matmul: cuda routes "
+        "mm/bmm to FlagGems (FlagGems issue #6223); Ascend attributes it to the "
+        "allocation op that follows the launch (issue #425)"
+    ),
     strict=False,
 )
 def test_profiler_device_time_linkage(profile_result, profiler_capabilities):

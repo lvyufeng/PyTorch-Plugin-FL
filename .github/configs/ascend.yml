@@ -149,11 +149,11 @@ integration_tests:
   #
   # INTEGRATION_ALLOW_TEARDOWN_CRASH is the second half of that instability:
   # the same interposer faults sporadically during interpreter teardown, after
-  # pytest has printed a complete, clean summary (observed: 2 passed, 10
-  # skipped, then SIGSEGV seconds later). The runner forgives a fatal signal
-  # only on top of such a summary -- a signal before it, or a summary
-  # reporting failures, still fails. Quoted "1": the manifest validates
-  # environment values as strings.
+  # pytest has printed a complete, clean summary (first observed following a
+  # clean "2 passed, 10 skipped" summary, then SIGSEGV seconds later). The
+  # runner forgives a fatal signal only on top of such a summary -- a signal
+  # before it, or a summary reporting failures, still fails. Quoted "1": the
+  # manifest validates environment values as strings.
   - name: Unified profiler contract
     environment:
       LD_PRELOAD: ${ASCEND_MSPTI_PRELOAD}
@@ -162,8 +162,17 @@ integration_tests:
       python -m pytest tests/integration/test_profiler_contract.py
       -v -m profiler --tb=short
 
-  # Device-only contract cases skip through profiler capabilities while the
-  # Ascend tracer exposes CPU/Trace records only. CPU/API coverage still runs.
+  # Device-side contract cases run on Ascend now, not only CPU/Trace: kernel,
+  # runtime, flow, and metadata are capability rows the tracer satisfies, and
+  # the step below was measured on 910 with CANN 9.0 at "10 passed, 1 skipped,
+  # 1 xfailed" (the skip is memset, the xfail is
+  # test_profiler_device_time_linkage -- Ascend's device time is attributed to
+  # the allocation op that follows the launch rather than to the launcher,
+  # issue #425; that case's xfail is now scoped to the two platforms with a
+  # measured reason for it, cuda and ascend, where it used to be unconditional).
+  # The runtime `cbid` argument stays off: MSPTI runtime records carry the
+  # vendor-resolved API name and no callback id.
+  #
   # Memset stays off even with MSPTI loaded: torch.zeros() -- the only zeroing
   # op reachable from the shared profile_result() workload -- routes through the
   # aclnnInplaceZero kernel, not the allocator's aclrtMemset calls, because that
