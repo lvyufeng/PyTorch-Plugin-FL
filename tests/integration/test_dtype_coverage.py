@@ -20,10 +20,14 @@ binary, reduction, and indexing operations.
 
 Most of it is portable: the assertions are about the dtype a call returns, which
 every backend is expected to preserve. The handful that compare against the CPU
-*implementation* rather than its dtype are marked per platform below, because a
-backend only matches the reference where it declines the operand and reaches
-reference code -- a routing decision, not a dtype contract.
+*implementation* rather than its dtype are marked per platform below, for one of
+two reasons: a backend only matches the reference where it declines the operand
+and reaches reference code -- a routing decision, not a dtype contract -- and a
+backend that computes float32 in a reduced-precision format matches neither the
+reference nor the precision the dtype names.
 """
+
+import os
 
 import pytest
 import torch
@@ -72,6 +76,69 @@ _REFERENCE_NEG_IS_ASCEND_ONLY = detect_platform() != "ascend"
 # disagreement is arithmetic rather than a missing kernel.
 _GCU = detect_platform() == "gcu"
 _MUSA = detect_platform() == "musa"
+
+# The float32 counterpart of the float64 matmul case below: an fp32 product must
+# be computed in fp32, not in a 10-bit-mantissa format that is only *stored* in
+# fp32. The two are ~900x apart, whichever op and shape is measured, so a
+# dimensionless bound separates them without a per-shape constant -- measured on
+# a MetaX C550 over 5 shapes x 20 seeds: 6.0e-08 to 2.9e-07 relative to an fp64
+# CPU reference when the computation is fp32, 2.6e-04 to 3.3e-04 when the GEMM
+# takes its TF32 kernel. 1e-5 is ~35x above the worst faithful measurement and
+# ~26x below the best reduced-precision one.
+FP32_MATMUL_RELATIVE_ERROR = 1e-5
+
+# Ascend is the one backend that cannot meet that bound, and it does not claim
+# to: the cube takes an HF32 (10-bit mantissa) input format by request --
+# `get_cube_math_type(true)` in `csrc/aten/backends/ascend/matmul.cc`, the
+# switch `scripts/tools/verify_flaggems_ascend.py` reads as "~5e-3 on a K=128
+# matmul" and this file's TestMatrixOps sibling in `tests/integration/test_ops.py`
+# carries as its `MM_RTOL`/`MM_ATOL` comment, flat at ~1.5e-4 relative. The
+# switch the cases below are about -- `torch.backends.cuda.matmul.allow_tf32`
+# and the `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` that seeds it -- has no effect on
+# that path, so xfail rather than assert: a precision mode the backend chose is
+# not a contract worth reddening its job over, and xfail turns into an XPASS the
+# day Ascend starts computing fp32 in fp32.
+_ASCEND = detect_platform() == "ascend"
+
+_ASCEND_HF32_REASON = (
+    "Ascend's cube takes the reduced-precision HF32 input format by request "
+    "(get_cube_math_type(true) in csrc/aten/backends/ascend/matmul.cc), and "
+    "the TF32 switches this case is about do not reach that path"
+)
+
+
+def _relative_error(got, reference):
+    """Frobenius relative error of an fp32 device result over its fp64 CPU pair.
+
+    Per-element relative error is not usable here, which is why this case does
+    not use ``torch.testing.assert_close``. A random matmul's reference has
+    entries near zero, so cancellation alone puts ~5.6e-01 between a *correct*
+    fp32 product and its fp64 reference at 64x128 @ 128x32 -- larger than the
+    reduced-precision gap the case is about, which would make the assertion
+    vacuous. The norm ratio has neither that pole nor a shape-dependent scale:
+    it is ~2e-07 for fp32 and ~3e-04 for a 10-bit input format at every shape
+    measured, so one constant covers them all.
+    """
+    return float((got.double() - reference).norm() / reference.norm())
+
+
+def _precision_failure(op, relative):
+    """Name the numbers and both switches, so a failure reads on its own."""
+    try:
+        allow_tf32 = torch.backends.cuda.matmul.allow_tf32
+    except RuntimeError as error:
+        # A process that set `fp32_precision` without `allow_tf32` is left in a
+        # mixed-API state where the legacy accessor raises, and a failure message
+        # must not turn a failed assertion into an error.
+        allow_tf32 = f"unreadable ({error})"
+    return (
+        f"fp32 {op} differs from the fp64 CPU reference by {relative:.3e} "
+        f"relative (limit {FP32_MATMUL_RELATIVE_ERROR:.0e}); a 10-bit-mantissa "
+        f"matmul lands at ~3e-04 and fp32 at ~2e-07. "
+        f"torch.backends.cuda.matmul.allow_tf32={allow_tf32}; "
+        f"TORCH_ALLOW_TF32_CUBLAS_OVERRIDE="
+        f"{os.environ.get('TORCH_ALLOW_TF32_CUBLAS_OVERRIDE')!r}"
+    )
 
 
 class TestFactoryDtypeSupport:
@@ -208,6 +275,47 @@ class TestBinaryDtypeSupport:
         b = torch.randn(4, 4, dtype=torch.float64)
         result = torch.matmul(a.to(DEVICE), b.to(DEVICE)).cpu()
         torch.testing.assert_close(result, torch.matmul(a, b), rtol=1e-12, atol=1e-12)
+
+    @pytest.mark.xfail(_ASCEND, reason=_ASCEND_HF32_REASON, strict=False)
+    def test_float32_mm_is_computed_in_float32(self):
+        """An fp32 `mm` is an fp32 computation, not a reduced-precision one.
+
+        The float64 case above asks whether the device answer is a float64
+        answer. This one asks the same of float32, and it is the case that
+        notices when an accelerator replaces the fp32 arithmetic with a 10-bit
+        input format: issue #253 is exactly that, one environment variable in
+        the MetaX image away, silently turning every numeric assertion in the
+        job into a TF32 assertion -- and issue #409 is the same loss chosen
+        deliberately on Ascend. Shape is `tests/integration/test_ops.py`'s
+        `TestMatrixOps::test_mm`, whose 1e-3/1e-2 bound is wide enough to admit
+        either mode; this one is not.
+        """
+        torch.manual_seed(0)
+        a = torch.randn(64, 128)
+        b = torch.randn(128, 32)
+        got = torch.mm(a.to(DEVICE), b.to(DEVICE)).cpu()
+        relative = _relative_error(got, torch.mm(a.double(), b.double()))
+        assert relative < FP32_MATMUL_RELATIVE_ERROR, _precision_failure("mm", relative)
+
+    @pytest.mark.xfail(_ASCEND, reason=_ASCEND_HF32_REASON, strict=False)
+    def test_float32_bmm_is_computed_in_float32(self):
+        """The batched case, which is where attention loses the bits it needs.
+
+        `bmm` is the op the issue's decoder models fail on: a forward pass that
+        keeps every fp32 GEMM at ~2e-07 still diverges in `out.logits` at
+        ~2e-04 once the attention `bmm` products run reduced-precision, and the
+        accumulated error is the whole gap. Same bound and same shape as
+        `tests/integration/test_ops.py`'s `test_bmm`, so the two files agree on
+        what the batched product is measured against.
+        """
+        torch.manual_seed(0)
+        a = torch.randn(4, 64, 128)
+        b = torch.randn(4, 128, 32)
+        got = torch.bmm(a.to(DEVICE), b.to(DEVICE)).cpu()
+        relative = _relative_error(got, torch.bmm(a.double(), b.double()))
+        assert relative < FP32_MATMUL_RELATIVE_ERROR, _precision_failure(
+            "bmm", relative
+        )
 
     def test_mixed_float_promotion(self):
         """Tensor-tensor arithmetic follows PyTorch promotion rules."""

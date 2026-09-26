@@ -312,6 +312,91 @@ Multi-GPU distributed training routes through the NCCL-shaped `mccl` fallback. T
 
 MetaX carries FSDP2 and Qwen3 training parity work in repository history, but these tests are not part of the CI manifest. Model-level validation remains a manual exercise on MetaX hardware.
 
+## fp32 Matmul Precision (TF32)
+
+An fp32 `mm`/`bmm` on MetaX computes in fp32 by default. The MetaX container
+image used by this project's CI does not: it exports
+
+```bash
+TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+```
+
+ATen reads that variable while it initialises its TF32 state, so it is applied
+before any user code runs and before the device is touched:
+
+```python
+torch.backends.cuda.matmul.allow_tf32      # True
+torch.backends.cuda.matmul.fp32_precision  # 'tf32'
+```
+
+MACA's GEMM then takes its TF32 kernel for an fp32 product — profiling an fp32
+`addmm` in that process names `mcblas__Mck_tf32gemm_tn_..._tf32_...` — which is
+the documented meaning of the variable and is what PyTorch asked for. The vendor
+kernel is faithful to that setting; `torch_fl` never changes it, and no routing
+change recovers the bits, because the same setting is inherited by every other
+vendor GEMM the process reaches (fp32 `scaled_dot_product_attention` on the
+MetaX build is served from the vendor path and loses precision the same way).
+This is a property of the deployment environment, not of the wheel.
+
+The loss is ~900x, whatever the op and shape. Relative Frobenius error against an
+fp64 CPU reference, 5 shapes × 20 seeds on a C550:
+
+| computation | relative error |
+| --- | --- |
+| fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`) | 6.0e-08 .. 2.9e-07 |
+| TF32 (image default) | 2.6e-04 .. 3.3e-04 |
+
+Check it in one line:
+
+```bash
+python -c "
+import torch_fl, torch
+torch.manual_seed(0)
+a, b = torch.randn(64, 128), torch.randn(128, 32)
+got = torch.mm(a.to('flagos:0'), b.to('flagos:0')).cpu().double()
+ref = torch.mm(a.double(), b.double())
+print('relative error:', ((got - ref).norm() / ref.norm()).item())
+# ~3e-07 is fp32, ~3e-04 is TF32
+"
+```
+
+### Turning it off
+
+Set the variable to `0` (or leave it unset) **before the process starts** — `0` is
+the explicit-off spelling, and it is what cancels an inherited `1`. Unset and `0`
+are numerically identical; a non-numeric value such as `false` or an empty string
+raises a `UserWarning` and is treated as off.
+
+```bash
+TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0 python your_script.py
+```
+
+For a process that cannot change its environment, the setting is reachable
+in-process, and the legacy accessor is the one to use:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = False   # clean: no warning, both accessors stay readable
+```
+
+`torch.backends.cuda.matmul.fp32_precision = "ieee"` also takes effect, but it
+moves the object to the new API alone, and reading `allow_tf32` afterwards then
+raises `RuntimeError: ... mix of the legacy and new APIs to set the TF32 status
+for cublas matmul`. Setting `allow_tf32` repairs that state, so it is the setter
+to reach for if either API has already been touched.
+
+`torch_fl`'s own CI pins `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0` in
+`.github/configs/metax.yml` (`integration_environment`), so the MetaX
+integration job measures fp32 rather than TF32.
+`tests/integration/test_dtype_coverage.py` holds the resulting precision to 1e-5
+relative, which fails if that pin is dropped. MetaX is the platform those two
+cases were measured on. Ascend is the one backend that cannot meet the bound and
+does not claim to — its cube takes HF32 by request, the switch the
+`MM_RTOL`/`MM_ATOL` comment in `tests/integration/test_ops.py` and issue #409 are
+about — so they are xfailed there. No other platform was measured; what the
+cases rest on for them is their own code, not a routing table: the FlagGems
+`mm`/`bmm` pass `allow_tf32=False` to `tl.dot` explicitly, and MUSA's `mudnn`
+handle is refreshed from `at::globalContext().allowTF32CuBLAS()` on every call.
+
 ## Troubleshooting
 
 ### Import Error: `undefined symbol` from libtorch
