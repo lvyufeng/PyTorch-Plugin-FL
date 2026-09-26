@@ -23,7 +23,30 @@ runner_labels:
 
 container_volumes: []
 
-integration_environment: {}
+# Issue #253. The MetaX image exports TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, which
+# ATen reads while it initialises its TF32 state, so
+# torch.backends.cuda.matmul.allow_tf32 is already True before user code runs
+# and MACA's GEMM takes its TF32 kernel for an fp32 mm/bmm. That is the
+# documented meaning of the variable and MACA honors it -- the kernel is not the
+# defect -- but it makes every numeric assertion in this job a TF32 assertion:
+# measured on the C550, an fp32 64x128 @ 128x32 mm lands 1.5e-02 from an fp64
+# reference with the variable set and 1.3e-05 without.
+#
+# "0" is the explicit-off spelling, and it is what overrides an inherited 1. A
+# non-numeric value such as "false" or an empty string raises a UserWarning and
+# is treated as off, so both are load-bearing spellings and neither is used
+# here; unset and 0 are numerically identical but unset cannot cancel the
+# image's value.
+#
+# This is the environment, not set_env_metax.sh, because the setup script runs
+# as its own step: each step gets a fresh shell, so an unset inside the script
+# reaches nothing, and $GITHUB_ENV would only be a second copy of this line.
+# Nothing in the build reads the flag. tests/integration/test_dtype_coverage.py
+# pins the resulting precision, so a dropped pin fails a test -- and fails it on
+# the step below that names test_dtype_coverage.py -- rather than passing
+# silently.
+integration_environment:
+  TORCH_ALLOW_TF32_CUBLAS_OVERRIDE: "0"
 
 container_options: >-
   --privileged
