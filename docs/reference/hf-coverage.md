@@ -51,6 +51,12 @@ The corrected verification grouped the 20 occurrences into these tracked causes:
 | | `FEATURE_UNSUPPORTED` | TorchInductor/Triton requires CUDA libraries | 2 | [#264](https://github.com/flagos-ai/Torch-FL/issues/264) |
 | | `OP_UNSUPPORTED` | mudnn `TRUEDIV` with `INT64` | 2 | [#266](https://github.com/flagos-ai/Torch-FL/issues/266) |
 
+`Affected tests` is the count this baseline measured on `64e60dd` and is not
+updated here: the table's job is to say which occurrence a re-measurement is
+looking at, so a count rewritten against a later tree would stop matching the run
+it came from. Which rows are still live work is recorded in prose below, where a
+closure can carry the commit that closed it.
+
 The `Fingerprint` column is what deduplication keys on: `transformers_deduplicate.py`
 reads it from each baseline's cause table, and `transformers_file_issues.py`
 fills it in when it records a newly filed issue. The five rows above are left
@@ -74,6 +80,46 @@ incorrect parameterized nodeids. The initial baseline remains useful as the raw
 suite measurement, but the corrected per-test isolation is the evidence used for
 root-cause filing. Raw JSON remains outside the repository at
 `/tmp/qwen3.json` and `/tmp/qwen3_isolated_results_v2.json`.
+
+### What has changed since this baseline
+
+Four of the five causes have a fix; the fifth is the only reason this baseline is
+not fully resolved.
+
+- **#250, #265** (device context poisoning, and its `test_model_parallelism`
+  trigger) — closed 2026-09-15, the same day PR #280 (`6b2af4b`, "stage
+  cross-device copies in MudnnCopy instead of handing mudnn two devices") landed,
+  with PR #282 ("order the peer device against a cross-device D2D copy") covering
+  the ordering half.
+- **#262, #268** (mudnn softmax rejects non-contiguous input) — PR #398
+  (`6a9c101`, 2026-09-23, "materialize strided softmax operands before mudnn on
+  MUSA"), which closed #262 the same day. #268 was closed three days later, on
+  2026-09-26, against that fix after its borrowed nodeids were re-measured. The eight
+  SDPA nodeids this row borrowed were re-measured on `main @ 48829b8` with the
+  harness's device shims enabled and report `{"PASS": 8}`; the
+  `RuntimeError: _softmax failed: INVALID_PARAMETER` signature the run recorded is
+  raised by none of them. With the shims disabled
+  (`HF_TEST_NO_DEVICE_SHIMS=1`) the same eight fail, but on the 80 % `allclose`
+  check and not in the operator: `tests/test_modeling_common.py:486` falls through
+  to fp32's `atol = 1e-7, rtol = 1e-4` for a device name transformers does not
+  list, which is the fall-through #248 documents for GCU. That residual belongs
+  with #248. Only those eight were re-run.
+- **#266** (mudnn `TRUEDIV` with `INT64`) — PR #278 (`251c9c8`, 2026-09-15, "route
+  MUSA integer division through mudnn and promote true division").
+- **#264** (TorchInductor/Triton requires CUDA libraries) — PR #419 (`48829b8`,
+  "ask torch, not the redirected probe, before aliasing cuda to flagos").
+- **#263** (ProcessGroupGloo rejects `flagos` tensors) — still open. Its six
+  FSDP2 nodeids are the remaining known failures of this baseline, and the failure
+  reproduces today: `RuntimeError: ProcessGroupGloo::allreduce: unsupported device
+  type flagos`.
+
+Because `Affected tests` and the baseline header above describe `64e60dd`, the
+whole table is a dated snapshot and not a statement about the current tree.
+Re-running the baseline is what refreshes it — and is also what fills in the
+`Fingerprint` column, per the note above. The closures above are recorded from the
+issues and the commits that landed; only the #268 re-measurement re-ran any of
+this baseline's tests, and it covers eight nodeids out of twenty, so the other
+four causes are **not revalidated** here.
 
 ### Failed test inventory
 
@@ -110,3 +156,11 @@ SDPA-named tests reproduced the same non-contiguous softmax failure rather than 
 pure tolerance mismatch. Future measurements must also run with
 `FLAGOS_LOG=fallback` and report any passing operation that used CPU fallback
 as an accelerator coverage gap.
+
+That last clause is worth revisiting now that #398 has landed. With the strided
+operands materialized before mudnn, a tolerance mismatch is exactly what those
+eight show: they pass under the harness's device shims and fail without them, at
+the `allclose` check rather than in the operator (the re-measurement above). The
+baseline's reading was right for the tree it measured — and the behaviour it ruled
+out is what remains once the operator is fixed, which is why the residual is
+tracked by #248 and not as a softmax defect.
