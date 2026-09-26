@@ -22,8 +22,13 @@ pins the two parts that need no hardware:
     the flagos construction path at all -- a wrong answer here is silent, and
     sends a flagos module down the cuda-first path the patch exists to avoid;
   * the wiring: that the ecosystem phase installs all three patches, that the
-    comm patch rebinds every function DataParallel's comm layer calls, and that
-    a module which is *not* on a flagos device still reaches the original
+    comm patch hands torch's comm primitives to the extension, and that the
+    extension publishes exactly the primitives torch's comm layer calls -- a
+    torch upgrade that reaches for a new one would otherwise escape the patch
+    silently;
+  * that the scatter scope a flagos ``DataParallel`` sets is restored on the way
+    out, including when the scatter raises;
+  * that a module which is *not* on a flagos device still reaches the original
     ``__init__``.
 
 Parsed and exec'd rather than imported: ``torch_fl/__init__.py`` imports torch
@@ -32,23 +37,35 @@ as ``tests/unit/test_import_phase_order.py``, for the same reason.
 """
 
 import ast
+import re
 import types
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INIT = REPO_ROOT / "torch_fl" / "__init__.py"
+COMM_CC = REPO_ROOT / "torch_fl" / "csrc" / "dataparallel_comm.cc"
 
 _DEVICE_TYPES = "_FLAGOS_DEVICE_TYPES"
 _HELPERS = ("_flagos_device_type_of_tensors", "_flagos_module_device_type")
 
-#: Functions the comm patch must replace: the three CUDA-only C++ ops that
-#: DataParallel's forward path reaches (scatter, then replicate ->
-#: broadcast_coalesced, then gather). ``reduce_add_coalesced`` is deliberately
-#: absent -- it is the backward path, and it already works for flagos tensors
-#: because ``comm.reduce_add`` falls back to its device-agnostic Python
-#: implementation whenever ``nccl.is_available()`` is False, which it is for
-#: privateuseone tensors.
-_COMM_FUNCTIONS = {"scatter", "gather", "broadcast_coalesced"}
+#: The CUDA-only C++ ops on ``torch._C`` that DataParallel's comm layer reaches:
+#: scatter, then replicate -> broadcast_coalesced, then gather, plus the ``_out``
+#: forms the ``out=`` argument selects. They are replaced by the extension, not
+#: by Python, and each replacement falls back to the original it replaced as
+#: soon as no flagos tensor is involved.
+#: ``reduce_add_coalesced`` is deliberately absent -- it is the backward path,
+#: and it already works for flagos tensors because ``comm.reduce_add`` falls back
+#: to its device-agnostic Python implementation whenever ``nccl.is_available()``
+#: is False, which it is for privateuseone tensors.
+_COMM_PRIMITIVES = {
+    "_broadcast",
+    "_broadcast_coalesced",
+    "_broadcast_out",
+    "_gather",
+    "_gather_out",
+    "_scatter",
+    "_scatter_out",
+}
 
 
 class _Tensor:
@@ -150,17 +167,85 @@ def test_ecosystem_installs_the_dataparallel_patches():
     )
 
 
-def test_comm_patch_rebinds_every_function_the_comm_layer_calls():
+def test_comm_patch_hands_the_primitives_to_the_extension():
+    patch = _function(_tree(), "_patch_comm_for_flagos")
+    calls = _called_names(patch)
+    # The implementations live in the extension -- because they have to read and
+    # write flagos tensors with C++ tensor ops, and because rebinding
+    # ``torch._C``'s attributes is a step Python cannot take without shadowing
+    # the module for everyone, including torch's own lazily-imported callers.
+    assert "_init_dataparallel_comm" in calls, sorted(calls)
+    # And the Python wrappers that used to stand in for it are gone: a leftover
+    # ``_comm.scatter = ...`` would be a second, drifting copy of the same rules.
     rebound = {
         target.attr
-        for node in ast.walk(_function(_tree(), "_patch_comm_for_flagos"))
+        for node in ast.walk(patch)
         if isinstance(node, ast.Assign)
         for target in node.targets
         if isinstance(target, ast.Attribute)
         and isinstance(target.value, ast.Name)
         and target.value.id == "_comm"
     }
-    assert rebound == _COMM_FUNCTIONS
+    assert rebound == set(), sorted(rebound)
+
+
+def test_comm_patch_scatter_restores_the_scope_it_sets():
+    scatter = _nested(_tree(), "_patch_dataparallel_for_flagos", "_patched_scatter")
+    calls = [
+        node
+        for node in ast.walk(scatter)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func).endswith("_set_scatter_scope")
+    ]
+    # Set once, restored once.
+    assert len(calls) == 2, ast.unparse(scatter)
+    # And restored in a `finally`: the scope is a thread-local living in the
+    # extension, and a scatter that raises must not leave it set for whatever
+    # this thread scatters next.
+    finals = [
+        node
+        for node in ast.walk(scatter)
+        if isinstance(node, ast.Try) and node.finalbody
+    ]
+    assert finals, ast.unparse(scatter)
+    assert any(
+        isinstance(inner, ast.Call)
+        and ast.unparse(inner.func).endswith("_set_scatter_scope")
+        for node in finals
+        for stmt in node.finalbody
+        for inner in ast.walk(stmt)
+    ), ast.unparse(scatter)
+
+
+def _published_primitives():
+    """The ``torch._C`` names the extension's rebinding publishes."""
+    source = COMM_CC.read_text(encoding="utf-8")
+    return set(re.findall(r'py::setattr\(\s*m\s*,\s*"(_[A-Za-z0-9_]+)"', source))
+
+
+def _torch_comm_primitives():
+    """The ``torch._C`` names torch's own comm layer reaches for.
+
+    Scraped from the installed source rather than pinned to a list here: the
+    point of the check is that our rebinding tracks whatever torch ships, so a
+    primitive added upstream fails this test instead of escaping the patch.
+    """
+    import torch
+
+    comm_py = Path(torch.__file__).resolve().parent / "nn" / "parallel" / "comm.py"
+    assert comm_py.is_file(), comm_py
+    return set(
+        re.findall(r"torch\._C\.(_[A-Za-z0-9_]+)", comm_py.read_text(encoding="utf-8"))
+    )
+
+
+def test_extension_publishes_every_primitive_torch_comm_calls():
+    called = _torch_comm_primitives()
+    # If this half fails, torch grew (or lost) a primitive and
+    # _COMM_PRIMITIVES -- and the rebinding -- have to follow.
+    assert called == _COMM_PRIMITIVES, sorted(called)
+    published = _published_primitives()
+    assert published == called, sorted(published ^ called)
 
 
 def _nested(tree, outer, inner):
