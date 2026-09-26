@@ -40,6 +40,15 @@ SHARED_FUNCS = [
     "venv_is_usable",
 ]
 
+#: The provisioning phases that were byte-for-byte the same modulo the pins.
+SHARED_PHASES = [
+    "install_cpu_torch",
+    "install_flagtree",
+    "install_flagcx",
+    "build_flagos_inplace",
+    "export_ci_env",
+]
+
 SOURCE_LINE = 'source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"'
 
 
@@ -77,3 +86,32 @@ def test_the_cuda_script_still_selects_its_interpreter_per_call():
     calls = re.findall(r"pip_retry ", text)
     prefixed = re.findall(r'PIP_RETRY_PYTHON="\$[A-Za-z_]+" pip_retry ', text)
     assert calls and len(calls) == len(prefixed), (len(calls), len(prefixed))
+
+
+def test_the_library_defines_every_shared_phase():
+    text = LIB.read_text(encoding="utf-8")
+    for fn in SHARED_PHASES:
+        assert re.search(rf"^{fn}\(\) \{{", text, re.M), fn
+
+
+def test_no_script_redefines_a_shared_phase():
+    for script in _scripts():
+        text = script.read_text(encoding="utf-8")
+        for fn in SHARED_PHASES:
+            assert not re.search(rf"^{fn}\(\) \{{", text, re.M), f"{script.name}: {fn}"
+
+
+def test_every_script_calls_the_common_phases():
+    """The three phases every platform runs, called by name.
+
+    install_cpu_torch is separate: MetaX provisions its interpreter differently
+    (the image's /opt/venv, not a job-local venv) and keeps its own call.
+    """
+    for script in _scripts():
+        text = script.read_text(encoding="utf-8")
+        for phase in ("install_flagtree", "build_flagos_inplace", "export_ci_env"):
+            assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
+                f"{script.name}: {phase}"
+            )
+        if script.name != "set_env_metax.sh":
+            assert re.search(r"^[ \t]*install_cpu_torch\b", text, re.M), script.name

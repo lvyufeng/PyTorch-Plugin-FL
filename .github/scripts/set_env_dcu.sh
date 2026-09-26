@@ -207,9 +207,7 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   # bundled DTK .so). The pinned CI image ships it at /usr/bin/patchelf; the pip
   # install here is a redundant fallback in case the image lacks it.
   "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake build patchelf
-  "$VENV_PYTHON" -m pip install \
-    --index-url "$CPU_TORCH_INDEX_URL" \
-    "torch==$CPU_TORCH_VERSION"
+  install_cpu_torch
   if [[ "$CI_STAGE" == "integration" ]]; then
     # Pin numpy<2: the CPU torch wheel is built against the NumPy 1.x ABI, and
     # transformers pulls numpy 2.x which breaks torch's C extensions at import.
@@ -269,8 +267,7 @@ else
         compgen -G "$VENV_SITE/triton_kernels-*.dist-info" >/dev/null; do
     "$VENV_PYTHON" -m pip uninstall -y triton triton_kernels >/dev/null 2>&1 || break
   done
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" \
-    "flagtree===$FLAGTREE_VERSION"
+  install_flagtree
 fi
 
 HYGON_INDEX_URL="${TORCH_FL_HYGON_INDEX_URL:-$HYGON_INDEX_URL_DEFAULT}"
@@ -380,7 +377,7 @@ export LD_LIBRARY_PATH="${HYHAL_LD_PATH:+$HYHAL_LD_PATH:}$CPU_TORCH_ROOT/lib${VE
 cd "$REPO_ROOT"
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   # Prebuild so package_data sees libtorch_fl.so before python -m build.
-  python setup.py build_ext --inplace
+  build_flagos_inplace
 fi
 
 # Bundle DTK's device .so into torch_fl/lib_dcu for a self-contained wheel
@@ -593,11 +590,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ROCM_PATH \
-    FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH \
-    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD \
-    CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

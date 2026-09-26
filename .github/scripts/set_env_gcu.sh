@@ -174,9 +174,7 @@ fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake ninja build
-  "$VENV_PYTHON" -m pip install \
-    --index-url "$CPU_TORCH_INDEX_URL" \
-    "torch==$CPU_TORCH_VERSION"
+  install_cpu_torch
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
@@ -228,7 +226,7 @@ done
 # import, so the flagtree and FlagGems pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_gcu}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+install_flagtree
 
 # flagtree may bring torch_gcu as a dependency or bundle it in the wheel.
 # Uninstall it again to keep the isolated venv free of the vendor ABI.
@@ -287,13 +285,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR \
-    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS \
-    FLAGOS_DISABLE_CUDA_ASSETS TOPS_HOME TOPSATEN_LIB CPATH LIBRARY_PATH \
-    LD_LIBRARY_PATH; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS TOPS_HOME TOPSATEN_LIB CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
@@ -306,7 +298,7 @@ cd "$REPO_ROOT"
 if [[ "$CI_STAGE" == "build" ]]; then
   # Prebuild so package_data contains the generated libtorch_fl.so before the
   # common wheel workflow stages the final artifact.
-  python setup.py build_ext --inplace
+  build_flagos_inplace
 
   python - <<'PY'
 import torch_fl

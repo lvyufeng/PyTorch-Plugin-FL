@@ -215,7 +215,7 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # published binary so CI cannot fall back to a source build.
   FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}"
   FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+  install_flagtree
 
   # flagtree installs itself as the `triton` module, so assert on the resolved
   # module and not on the distribution name: an image triton-metax winning the
@@ -287,14 +287,7 @@ fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
-  for name in \
-    VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME \
-    FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM \
-    FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL \
-    FLAGOS_VENDOR_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_WHEEL_LOCAL FLAGOS_VENDOR_TORCH_LIB LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
@@ -310,7 +303,7 @@ if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   # Prebuilding makes torch_fl/lib/*.so available when the common workflow
   # packages the local wheel for either stage. The following python -m build
   # is incremental.
-  python setup.py build_ext --inplace
+  build_flagos_inplace
 fi
 
 # Populate the ignored package-data directory after the optional native

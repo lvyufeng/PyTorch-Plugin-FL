@@ -347,9 +347,7 @@ prefer_direct_route() {
 # --wheel --no-isolation` requires it; ensurepip on this image does not
 # provide it).
 "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" cmake patchelf build wheel
-"$VENV_PYTHON" -m pip install \
-  --index-url "$CPU_TORCH_INDEX_URL" \
-  "torch==$CPU_TORCH_VERSION"
+install_cpu_torch
 if [[ "$CI_STAGE" == "integration" ]]; then
   # sentencepiece + tiktoken: the Qwen3 inference/training tests load the model
   # tokenizer via AutoTokenizer; the bundled model dir has no tokenizer.json, so
@@ -435,7 +433,7 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # Both wheels live on resource.flagos.net, which this pod reaches directly
   # rather than through its rejecting HTTP proxy.
   prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+  install_flagtree
   prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
   install_flag_gems
 fi
@@ -482,7 +480,7 @@ cd "$REPO_ROOT"
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   # Prebuild so package_data sees libtorch_fl.so and the bundled PPU assets
   # before the common workflow invokes python -m build.
-  python setup.py build_ext --inplace
+  build_flagos_inplace
 fi
 
 # Bundle PPU core+CUDA+MKL .so into torch_fl/lib_ppu/ and rewrite the plugin
@@ -556,11 +554,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
-    PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_WHEEL_LOCAL FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH \
-    CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_WHEEL_LOCAL FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

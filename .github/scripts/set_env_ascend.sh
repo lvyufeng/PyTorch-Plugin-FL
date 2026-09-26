@@ -239,8 +239,7 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   # executed".
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade \
     pip setuptools wheel cmake build
-  "$VENV_PYTHON" -m pip install --index-url "$CPU_TORCH_INDEX_URL" \
-    "torch==$CPU_TORCH_VERSION"
+  install_cpu_torch
   # Unconditional, unlike the other vendors: Ascend's job builds the wheel and
   # runs the tests under one CI_STAGE=build invocation, so gating pytest on
   # CI_STAGE=integration installs it in no job at all. The previous CI image hid
@@ -276,7 +275,7 @@ done
 # and the Triton minor (3.5) has to match the backend the wheel was built for.
 # From the FlagTree user manual ("ascend", Triton 3.5 row).
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}"
-pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
+install_flagtree
 
 # Install the published Python wheel; avoid a GitHub checkout on the runner.
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
@@ -345,14 +344,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME \
-    FLAGOS_DISABLE_CUDA_ASSETS \
-    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TRITON_ENABLE_TASKQUEUE \
-    PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES \
-    CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
 fi
 
 cd "$REPO_ROOT"
@@ -361,7 +353,7 @@ if [[ "$CI_STAGE" == "build" ]]; then
   # Prebuild so package_data sees libtorch_fl.so before the common workflow
   # invokes python -m build. The following wheel build is incremental. The
   # integration job downloads this artifact and must not rebuild from source.
-  python setup.py build_ext --inplace
+  build_flagos_inplace
 
   # Build-stage availability check. Integration repeats this after installing
   # the artifact wheel from an isolated test workspace.

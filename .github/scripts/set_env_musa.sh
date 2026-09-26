@@ -183,9 +183,7 @@ if (( USING_PREBUILT == 0 )); then
   # that bakes a prebuilt musa venv must bake `build` into it too.
   "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL_ARG" \
     --upgrade pip setuptools wheel cmake ninja build
-  "$VENV_PYTHON" -m pip install \
-    --index-url "$CPU_TORCH_INDEX_URL" \
-    "torch==$CPU_TORCH_VERSION"
+  install_cpu_torch
 fi
 
 if [[ "$CI_STAGE" == "integration" ]]; then
@@ -260,7 +258,7 @@ fi
 # fails at import, so the two pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_musa}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" "flagtree===$FLAGTREE_VERSION"
+install_flagtree
 
 # flagtree may bring torch_musa as a dependency or in its wheel. Uninstall it
 # again to ensure isolation.
@@ -357,13 +355,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME \
-    FLAGOS_BUILD_VENDOR \
-    FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS \
-    MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
@@ -376,4 +368,4 @@ cd "$REPO_ROOT"
 # build_ext produces the libtorch_fl.so that package_data stages into the wheel,
 # and build and test share one job, so it must run in both stages. No device is
 # required here; the card was checked above for the integration stage.
-python setup.py build_ext --inplace
+build_flagos_inplace

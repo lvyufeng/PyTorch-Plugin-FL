@@ -402,9 +402,7 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 "$VENV_PYTHON" -m pip install --upgrade pip "setuptools>=64,<77" "setuptools-scm>=8,<10" "wheel==0.46.2" cmake build
-"$VENV_PYTHON" -m pip install \
-  --index-url "$CPU_TORCH_INDEX_URL" \
-  "torch==$CPU_TORCH_VERSION"
+install_cpu_torch
 
 # FlagTree ships its own Triton provider; nothing else in the environment may
 # shadow it, so it is installed last with --no-deps.
@@ -437,8 +435,7 @@ if [[ "$(printf '%s\n%s\n' "$FLAGTREE_MIN_GLIBC" "$IMAGE_GLIBC" | sort -V | head
 fi
 echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
 
-PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" \
-  "flagtree===${FLAGTREE_VERSION}"
+install_flagtree
 
 # Keep only vendor packages that are not provided by FlagTree. In particular,
 # do not copy vendor `triton` or `triton_kernels`: either would contaminate the
@@ -566,7 +563,7 @@ PY
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   # Prebuild so package_data sees libtorch_fl.so and the bundled CUDA assets
   # before the common workflow invokes python -m build.
-  python setup.py build_ext --inplace
+  build_flagos_inplace
 fi
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -605,14 +602,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PATH" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  for name in \
-    PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH \
-    FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR \
-    FLAGOS_BUILD_FLAGGEMS_CPP \
-    USE_FLAGTUNE \
-    CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH; do
-    printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
-  done
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGOS_CUDA_ASSETS_DIR FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi
