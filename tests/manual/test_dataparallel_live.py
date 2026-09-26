@@ -162,6 +162,58 @@ def main():
         str([[str(t.device) for t in per_device] for per_device in bcast]),
     )
 
+    # The remaining four primitives the extension replaces -- the `out=` forms
+    # and plain comm.broadcast -- are not on DataParallel's path, but they are
+    # part of what was rebound, so they get a flagos check too rather than
+    # shipping unmeasured.
+    out_chunks = [torch.empty(rows // device_count, 4).to(d) for d in device_ids]
+    comm.scatter(x, None, None, 0, None, out=out_chunks)
+    check(
+        "comm.scatter(out=[...]) fills the flagos outs in place",
+        all(torch.equal(o.cpu(), part.cpu()) for o, part in zip(out_chunks, parts))
+        and [str(o.device) for o in out_chunks] == [f"flagos:{d}" for d in device_ids],
+        str([str(o.device) for o in out_chunks]),
+    )
+
+    gather_out = torch.empty(rows, 4).to(0)
+    comm.gather(list(chunks), 0, out=gather_out)
+    check(
+        "comm.gather(out=...) fills the flagos destination in place",
+        str(gather_out.device) == "flagos:0" and torch.equal(gather_out.cpu(), x.cpu()),
+        str(gather_out.device),
+    )
+
+    bcast_plain = comm.broadcast(t1, device_ids)
+    check(
+        "comm.broadcast -> one flagos copy per device",
+        [str(t.device) for t in bcast_plain] == [f"flagos:{d}" for d in device_ids]
+        and all(torch.equal(t.cpu(), t1.cpu()) for t in bcast_plain),
+        str([str(t.device) for t in bcast_plain]),
+    )
+
+    bcast_outs = [torch.zeros(2).to(d) for d in device_ids]
+    comm.broadcast(t1, out=bcast_outs)
+    check(
+        "comm.broadcast(out=[...]) fills the flagos outs in place",
+        all(torch.equal(o.cpu(), t1.cpu()) for o in bcast_outs),
+        str([str(o.device) for o in bcast_outs]),
+    )
+
+    # comm.py validates the devices/out mutual exclusion in Python, one layer
+    # above the ops that were rebound. It has to still fire, or the replacement
+    # would have quietly widened the public API.
+    try:
+        comm.scatter(x, device_ids, None, 0, None, out=out_chunks)
+    except RuntimeError as exc:
+        rejected = "'devices' must not be specified when 'out' is specified" in str(exc)
+    else:
+        rejected = False
+    check(
+        "comm.scatter(devices=..., out=...) still raises the stock error",
+        rejected,
+        "" if rejected else "no RuntimeError",
+    )
+
     # --- DataParallel construction and forward --------------------------------
     model = Net().to(0)
     batch = 2 * device_count
