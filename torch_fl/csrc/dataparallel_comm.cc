@@ -45,12 +45,16 @@
 // runs them through its own.
 //
 // InitDataParallelComm() publishes them by rebinding the seven attributes on
-// the already-imported torch._C with pybind11 m.def, which is the shape
-// torch_npu uses for the same problem (torch_npu/csrc/npu/Module.cpp's
-// initCommMethods() over torch_npu/csrc/npu/DataParallelComm.cpp). The
-// originals are captured first, and every replacement delegates to its original
-// as soon as no flagos tensor is involved, so a CUDA- or CPU-placed
-// DataParallel keeps stock behaviour exactly.
+// the already-imported torch._C -- the same shape torch_npu uses for the same
+// problem (torch_npu/csrc/npu/Module.cpp's initCommMethods() over
+// torch_npu/csrc/npu/DataParallelComm.cpp). The rebinding has to be a
+// py::setattr and not a module_::def: def passes whatever already sits under
+// the name as a pybind11 *sibling*, i.e. one more overload of the very
+// function being replaced, and the original is then still tried first. See the
+// comment in InitDataParallelComm(). The originals are captured first, and
+// every replacement delegates to its original as soon as no flagos tensor is
+// involved, so a CUDA- or CPU-placed DataParallel keeps stock behaviour
+// exactly.
 //
 // Two deliberate departures from torch/csrc/cuda/comm.cpp, both because the
 // device *type* is the only fixed thing here and the vendor is not:
