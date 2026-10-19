@@ -29,7 +29,7 @@ on:
       - '**/*.mdown'
       - '**/*.rst'
   pull_request:
-    branches: [main, dev, devops, dev-hygon, dev-musa]
+    branches: [main, dev, devops, dev-hygon, dev-musa, dev-thead]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
     inputs:
@@ -74,6 +74,7 @@ jobs:
           EVENT_REPOSITORY: ${{ github.repository }}
           EVENT_REF: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
           PR_NUMBER: ${{ inputs.pr_number || '' }}
           EXPECTED_REVISION: ${{ inputs.revision || '' }}
         run: |
@@ -206,9 +207,11 @@ jobs:
           PR_NUMBER: ${{ needs.resolve-checkout.outputs.pull_request }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms || '' }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
           BASE_REF: ${{ github.base_ref || 'main' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           HEAD_SHA: ${{ needs.resolve-checkout.outputs.ref }}
+          EVENT_REF: ${{ github.ref }}
           WORKFLOW_RUN: ${{ github.run_id }}
           # A GitHub "rerun failed jobs" publishes a new shared-check owner
           # instead of reusing a possibly superseded result from the old run.
@@ -259,13 +262,13 @@ jobs:
             --workflow-attempt "$WORKFLOW_ATTEMPT" \
             >> "$GITHUB_OUTPUT"
 
-  # One hardware pipeline per configured platform. Each call starts its own
-  # configuration and admission job, so the lanes do not queue behind one
-  # another while waiting for a runner.
-  platform-pipeline:
-    name: Platform pipeline (${{ matrix.platform }})
+  # Each platform is a separate reusable-workflow call. A vendor whose runner
+  # is busy therefore does not hold another platform's hardware job in a
+  # shared matrix queue.
+  pr-platform:
+    name: PR platform (${{ matrix.platform }})
     needs: [resolve-checkout, discover-platforms]
-    if: ${{ needs.discover-platforms.outputs.platforms != '' && needs.discover-platforms.outputs.platforms != '[]' }}
+    if: ${{ needs.resolve-checkout.outputs.pull_request != '' && needs.discover-platforms.outputs.platforms != '' && needs.discover-platforms.outputs.platforms != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -280,9 +283,25 @@ jobs:
       pr_number: ${{ needs.resolve-checkout.outputs.pull_request }}
       revision: ${{ needs.resolve-checkout.outputs.ref }}
 
+  branch-platform:
+    name: Branch platform (${{ matrix.platform }})
+    needs: [resolve-checkout, discover-platforms]
+    if: ${{ needs.resolve-checkout.outputs.pull_request == '' && needs.discover-platforms.outputs.platforms != '' && needs.discover-platforms.outputs.platforms != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
+    uses: ./.github/workflows/integration-tests.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
+    with:
+      platform: ${{ matrix.platform }}
+      checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
+      checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+
   # Single required-check gate for branch protection.
-  ci-complete:
-    name: CI complete
+  ci-shared:
+    name: CI shared
     if: always()
     needs:
       - resolve-checkout
@@ -291,13 +310,8 @@ jobs:
       - codegen-checks
       - discover-platforms
     runs-on: ubuntu-latest
-    concurrency:
-      # A fork pull request uses its source branch because fork events omit the
-      # pull request number. Each branch event has its own group.
-      group: ${{ (github.event_name == 'pull_request' && format('CI-pr-{0}', github.head_ref)) || (github.event_name == 'push' && format('CI-push-{0}', github.ref_name)) || format('CI-{0}-{1}', github.event_name, github.ref_name) }}
-      cancel-in-progress: true
     steps:
-      - name: Verify shared checks and selected platforms passed
+      - name: Verify shared checks and platform routing passed
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
@@ -322,15 +336,43 @@ jobs:
               errors.append(f"Invalid platform discovery: {exc}")
               selected = []
 
-          # Hardware runs independently after shared checks pass. Platform
-          # results are recorded as ci-platform statuses so shared checks do
-          # not wait for a busy hardware queue.
           for error in errors:
               print(f"::error::{error}")
           if errors:
               sys.exit(1)
-          # Hardware lanes are checked separately on the commit and can wait
-          # for their own runner queues. This summary covers the shared checks
-          # needed before hardware admission.
           print("Shared checks and platform routing passed.")
+          PY
+
+  ci-complete:
+    name: CI complete
+    if: always()
+    needs: [resolve-checkout, ci-shared, pr-platform, branch-platform]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify selected hardware lanes passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          jobs = json.loads(os.environ["RESULTS"])
+          if jobs["resolve-checkout"]["result"] != "success":
+              print(f"::error::resolve-checkout: {jobs['resolve-checkout']['result']}")
+              sys.exit(1)
+          if jobs["ci-shared"]["result"] != "success":
+              print(f"::error::ci-shared: {jobs['ci-shared']['result']}")
+              sys.exit(1)
+          hardware = (
+              "pr-platform"
+              if jobs["resolve-checkout"]["outputs"]["pull_request"]
+              else "branch-platform"
+          )
+          result = jobs[hardware]["result"]
+          if result != "success":
+              print(f"::error::{hardware}: {result}")
+              sys.exit(1)
+          print("Selected hardware lanes passed.")
           PY
