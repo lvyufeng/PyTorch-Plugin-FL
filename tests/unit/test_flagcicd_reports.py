@@ -399,7 +399,12 @@ def test_workflow_upload_boundary(
         for step in workflow["jobs"]["integration-tests"]["steps"]
         if step.get("id") == "flagcicd-auth"
     )
-    expression = auth["if"].removeprefix("${{").removesuffix("}}").strip()
+    expression = auth["if"].strip()
+    if expression.startswith("${{"):
+        expression = expression[3:]
+        if expression.endswith("}}"):
+            expression = expression[:-2]
+    expression = expression.strip()
     for key, value in {
         "github.event.pull_request.head.repo.full_name": head,
         "inputs.checkout_repository": checkout,

@@ -16,6 +16,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +32,16 @@ SPEC.loader.exec_module(MATRIX)
 PLATFORMS = MATRIX._load_platforms(CONFIGS)
 
 
-def _run(event="pull_request", files="", labels="", dispatch=""):
+def _run(
+    event="pull_request",
+    files="",
+    labels="",
+    dispatch="",
+    pr_number="",
+    run="1234",
+    attempt="1",
+    env=None,
+):
     result = subprocess.run(
         [
             sys.executable,
@@ -46,9 +56,16 @@ def _run(event="pull_request", files="", labels="", dispatch=""):
             labels,
             "--dispatch-platforms",
             dispatch,
+            "--pr-number",
+            pr_number,
+            "--workflow-run",
+            run,
+            "--workflow-attempt",
+            attempt,
         ],
         capture_output=True,
         text=True,
+        env={**os.environ, **(env or {})},
     )
     if result.returncode:
         return result, None
@@ -69,7 +86,7 @@ def _run(event="pull_request", files="", labels="", dispatch=""):
     ],
 )
 def test_platform_owned_files_select_only_that_lane(platform, path):
-    result, selected = _run(files=path.format(platform=platform))
+    result, selected = _run(files=path.format(platform=platform), pr_number="42")
     assert result.returncode == 0, result.stderr
     assert selected == [platform]
 
@@ -85,7 +102,7 @@ def test_platform_owned_files_select_only_that_lane(platform, path):
     ],
 )
 def test_documentation_needs_no_hardware(files):
-    assert _run(files=files)[1] == []
+    assert _run(files=files, pr_number="42")[1] == []
 
 
 @pytest.mark.parametrize(
@@ -107,22 +124,28 @@ def test_documentation_needs_no_hardware(files):
     ],
 )
 def test_shared_or_unknown_code_runs_every_lane_even_with_vendor_changes(path):
-    assert _run(files=f"torch_fl/accelerator/ascend/op.py\n{path}")[1] == PLATFORMS
+    assert (
+        _run(files=f"torch_fl/accelerator/ascend/op.py\n{path}", pr_number="42")[1]
+        == PLATFORMS
+    )
 
 
 def test_multiple_vendors_select_the_union():
     assert _run(
-        files="torch_fl/accelerator/ascend/op.py\ncsrc/aten/backends/musa/op.cc"
+        files="torch_fl/accelerator/ascend/op.py\ncsrc/aten/backends/musa/op.cc",
+        pr_number="42",
     )[1] == ["ascend", "musa"]
 
 
 def test_shared_cuda_runtime_selects_all_consumers():
-    assert _run(files="csrc/runtime/accelerator/cuda/device.cc")[1] == [
+    assert _run(files="csrc/runtime/accelerator/cuda/device.cc", pr_number="42")[1] == [
         "cuda",
         "dcu",
         "ppu",
     ]
-    assert _run(files="csrc/runtime/allocator/backends/cuda_memory.h")[1] == [
+    assert _run(files="csrc/runtime/allocator/backends/cuda_memory.h", pr_number="42")[
+        1
+    ] == [
         "cuda",
         "metax",
         "ppu",
@@ -133,7 +156,12 @@ def test_shared_cuda_runtime_selects_all_consumers():
 def test_runtime_watch_paths_cover_the_build_tables_actual_source_directory(platform):
     table = json.loads((ROOT / "cmake/flagos_platforms.json").read_text())
     runtime = table["accelerators"][platform]["runtime_dir"]
-    assert platform in _run(files=f"csrc/runtime/accelerator/{runtime}/device.cc")[1]
+    assert (
+        platform
+        in _run(files=f"csrc/runtime/accelerator/{runtime}/device.cc", pr_number="42")[
+            1
+        ]
+    )
 
 
 @pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
@@ -141,6 +169,117 @@ def test_non_pr_events_default_to_every_lane(event):
     assert (
         _run(event=event, files="README.md", labels="platform:ascend")[1] == PLATFORMS
     )
+
+
+@pytest.mark.parametrize("labels", ["", "platform:ascend"])
+def test_shared_check_passes_publish_only_after_the_head_was_checked(
+    tmp_path, monkeypatch, labels
+):
+    marker = tmp_path / "published"
+    head = "a" * 40
+
+    def no_changes(*args):
+        return []
+
+    def publish(*args):
+        marker.write_text(repr(args))
+
+    monkeypatch.setattr(MATRIX, "_changed_files", no_changes)
+    monkeypatch.setattr(MATRIX, "_publish_common", publish)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            str(SCRIPT),
+            "--event-name",
+            "workflow_call",
+            "--configs-dir",
+            str(CONFIGS),
+            "--base-ref",
+            "",
+            "--head-sha",
+            head,
+            "--pr-labels",
+            labels,
+            "--pr-number",
+            "42",
+            "--workflow-run",
+            "1234",
+            "--workflow-attempt",
+            "1",
+        ],
+    )
+    MATRIX.main()
+    assert marker.read_text() == repr((head, "1234-1"))
+
+
+def test_pr_dispatch_uses_files_and_labels_instead_of_branch_defaults():
+    assert _run(
+        event="workflow_dispatch",
+        files="torch_fl/accelerator/ascend/op.py",
+        dispatch="",
+        pr_number="42",
+    )[1] == ["ascend"]
+    assert _run(
+        event="workflow_dispatch",
+        files="README.md",
+        labels="platform:musa",
+        pr_number="42",
+    )[1] == ["musa"]
+
+
+def test_pr_attempt_defaults_to_the_event_attempt(tmp_path, monkeypatch):
+    args = [
+        "--event-name",
+        "pull_request",
+        "--configs-dir",
+        str(CONFIGS),
+        "--changed-files",
+        "README.md",
+        "--pr-labels",
+        "platform:ascend",
+        "--pr-number",
+        "42",
+        "--workflow-run",
+        "1234",
+    ]
+    marker = tmp_path / "owner"
+    monkeypatch.setattr(
+        MATRIX,
+        "_publish_common",
+        lambda revision, owner: marker.write_text(repr((revision, owner))),
+    )
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), *args])
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    MATRIX.main()
+    assert marker.read_text() == repr(("HEAD", "1234-2"))
+
+
+@pytest.mark.parametrize("number", ["0", "-1", "01", "＋1", "42; echo"])
+def test_pr_dispatch_rejects_invalid_number(number):
+    result, selected = _run(event="workflow_dispatch", pr_number=number)
+    assert result.returncode == 2
+    assert selected is None
+
+
+@pytest.mark.parametrize(
+    "run, attempt",
+    [("", "1"), ("0", "1"), ("01", "1"), ("1234", "0"), ("1234", "")],
+)
+def test_pr_dispatch_requires_an_attempt_one_owner(run, attempt):
+    result, selected = _run(run=run, attempt=attempt, pr_number="42")
+    assert result.returncode == 2
+    assert selected is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/integration-tests.yml",
+        ".github/workflows/lint.yml",
+    ],
+)
+def test_shared_pipeline_code_runs_all_platforms(path):
+    assert _run(files=path, pr_number="42")[1] == PLATFORMS
 
 
 @pytest.mark.parametrize(
@@ -153,7 +292,7 @@ def test_non_pr_events_default_to_every_lane(event):
     ],
 )
 def test_routing_labels_override_file_filters_without_duplicates(labels, expected):
-    assert _run(files="README.md", labels=labels)[1] == expected
+    assert _run(files="README.md", labels=labels, pr_number="42")[1] == expected
 
 
 @pytest.mark.parametrize(

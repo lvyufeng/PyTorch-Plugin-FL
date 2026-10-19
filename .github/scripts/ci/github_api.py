@@ -43,12 +43,24 @@ class GitHub:
             raise GitHubError(result.stderr.strip() or "GitHub CLI request failed")
         return result.stdout
 
-    def api(self, path, method="GET", payload=None, paginate=False):
+    def api(
+        self,
+        path,
+        method="GET",
+        payload=None,
+        paginate=False,
+        jq=None,
+        jq_args=None,
+    ):
         args = ["api", path, "--method", method]
         if payload is not None:
             args += ["--input", "-"]
         if paginate:
             args += ["--paginate", "--slurp"]
+        if jq is not None:
+            args += ["--jq", jq]
+        for name, value in (jq_args or {}).items():
+            args += ["-f", f"{name}={value}"]
         output = self.command(*args, payload=payload)
         return json.loads(output) if output.strip() else None
 

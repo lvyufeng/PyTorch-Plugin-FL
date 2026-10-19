@@ -37,7 +37,7 @@ def _workflow(name):
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
-def test_required_gate_covers_matrix_pipeline():
+def test_required_gate_covers_routing_and_hardware_runs_independently():
     jobs = _workflow("ci.yml")["jobs"]
     gate = jobs["ci-complete"]
     assert set(gate["needs"]) == {
@@ -46,8 +46,8 @@ def test_required_gate_covers_matrix_pipeline():
         "agnostic-checks",
         "codegen-checks",
         "discover-platforms",
-        "platform-pipeline",
     }
+    assert "platform-pipeline" not in gate["needs"]
     assert (
         jobs["platform-pipeline"]["uses"] == "./.github/workflows/integration-tests.yml"
     )
@@ -121,24 +121,25 @@ def test_dispatch_can_select_each_platform(platform):
 
 @pytest.mark.parametrize("selected", [True, False])
 @pytest.mark.parametrize("result", ["success", "skipped", "failure", "cancelled"])
-def test_required_gate_checks_platform_result(selected, result):
+def test_required_gate_checks_platform_routing_only(selected, result):
     gate = _workflow("ci.yml")["jobs"]["ci-complete"]
     results = {name: {"result": "success"} for name in gate["needs"]}
     results["discover-platforms"]["outputs"] = {
         "platforms": json.dumps(PLATFORMS[:1] if selected else [])
     }
-    results["platform-pipeline"]["result"] = result
+    results["discover-platforms"]["result"] = result
     process = subprocess.run(
         ["bash", "-e", "-c", gate["steps"][0]["run"]],
         env={**os.environ, "RESULTS": json.dumps(results)},
         capture_output=True,
         text=True,
     )
-    assert (process.returncode == 0) == (
-        result == "success" or (not selected and result == "skipped")
-    )
+    assert (process.returncode == 0) == (result == "success")
     if process.returncode:
-        assert f"platform-pipeline: {result}" in process.stdout
+        assert (
+            f"discover-platforms: {result}" in process.stdout
+            or f"platform routing did not succeed: {result}" in process.stdout
+        )
 
 
 @pytest.mark.parametrize(
@@ -163,4 +164,6 @@ def test_required_gate_rejects_skipped_shared_checks(name):
         text=True,
     )
     assert process.returncode == 1
-    assert f"{name}: skipped" in process.stdout
+    assert f"{name}: skipped" in process.stdout or (
+        "platform routing did not succeed: skipped" in process.stdout
+    )

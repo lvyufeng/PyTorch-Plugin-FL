@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / ".github/scripts/ci"
@@ -58,6 +59,7 @@ class FakeGitHub:
     def __init__(self):
         self.calls = []
         self.permission = "write"
+        self.runs = []
         self.pr = {
             "state": "open",
             "head": {"sha": SHA, "repo": {"full_name": "contributor/fork"}},
@@ -77,12 +79,13 @@ class FakeGitHub:
         ]
         self.log = "pip download: ReadTimeoutError: server timed out"
         self.logs = {}
-        self.fail_dispatch = False
         self.fail_logs = False
 
     def api(self, path, **kwargs):
         self.calls.append(("api", path, kwargs))
-        return {"default_branch": "main"}
+        if path == f"repos/{REPOSITORY}":
+            return {"default_branch": "main"}
+        raise AssertionError(f"Unexpected API path: {path}")
 
     def repo_api(self, path, **kwargs):
         self.calls.append(("api", path, kwargs))
@@ -92,6 +95,8 @@ class FakeGitHub:
             return {"permission": self.permission}
         if path.startswith("pulls/"):
             return self.pr
+        if path.startswith("actions/workflows/ci.yml/runs?"):
+            return [self.runs]
         if path.startswith("issues/"):
             return [[{"name": "platform:cuda"}, {"name": "bug"}]]
         if path.startswith("labels"):
@@ -105,8 +110,6 @@ class FakeGitHub:
 
     def command(self, *args):
         self.calls.append(("command", args, {}))
-        if args[:2] == ("workflow", "run") and self.fail_dispatch:
-            raise API.GitHubError("dispatch rejected")
         if args[:2] == ("run", "view"):
             if self.fail_logs:
                 raise API.GitHubError("log unavailable")
@@ -173,15 +176,25 @@ def test_unprivileged_users_cannot_run_hardware_even_if_they_authored_the_pr(
     assert not any(call[0] == "command" for call in github.calls)
 
 
+def _slash_event_dispatch(github):
+    return [
+        call[1]
+        for call in github.calls
+        if call[0] == "command" and call[1][:2] == ("workflow", "run")
+    ]
+
+
 @pytest.mark.parametrize("permission", ["write", "maintain", "admin"])
-def test_trusted_fork_dispatch_uses_base_workflow_and_keeps_nonrouting_labels(
+def test_trusted_fork_dispatch_fixes_the_head_before_label_changes(
     permission,
 ):
     github = FakeGitHub()
     github.permission = permission
-    assert "dispatched" in SLASH.handle(COMMENT_EVENT, PLATFORMS, github)
-    commands = [call[1] for call in github.calls if call[0] == "command"]
-    assert commands == [
+    outputs = {}
+    assert "dispatched" in SLASH.handle(COMMENT_EVENT, PLATFORMS, github, outputs)
+    assert outputs == {"pr_number": "42", "revision": SHA, "requested": "ascend"}
+    dispatch = _slash_event_dispatch(github)
+    assert dispatch == [
         (
             "workflow",
             "run",
@@ -194,12 +207,186 @@ def test_trusted_fork_dispatch_uses_base_workflow_and_keeps_nonrouting_labels(
             "platforms=ascend",
             "--field",
             "pr_number=42",
+            "--field",
+            f"revision={SHA}",
         )
     ]
+    assert next(
+        index
+        for index, call in enumerate(github.calls)
+        if call[0] == "command" and call[1][:2] == ("workflow", "run")
+    ) < next(
+        index
+        for index, call in enumerate(github.calls)
+        if call[1] == "issues/42/labels" and call[2].get("method") == "POST"
+    )
     deleted = [call[1] for call in github.writes() if call[2].get("method") == "DELETE"]
     assert deleted == ["issues/42/labels/platform%3Acuda"]
     assert any(call[1] == "issues/42/comments" for call in github.writes())
     assert any(call[1] == "issues/comments/9/reactions" for call in github.writes())
+
+
+def test_ci_workflow_starts_from_the_trusted_default_branch_after_the_command():
+    path = ROOT / ".github/workflows/slash-command.yml"
+    workflow = yaml.safe_load(path.read_text())
+    assert set(workflow[True]) == {"issue_comment", "workflow_dispatch"}
+    assert (
+        workflow["concurrency"]["group"]
+        == "CI-pr-${{ github.event.issue.number || inputs.pr_number }}"
+    )
+    assert workflow["concurrency"]["cancel-in-progress"] is True
+    job = workflow["jobs"]["create-ci"]
+    assert job["if"] == (
+        "${{ needs.dispatch.outputs.requested_platforms != '' && !cancelled() }}"
+    )
+    assert job["permissions"]["actions"] == "write"
+    script = job["steps"][0]["run"]
+    assert "actions/workflows/ci.yml/dispatches" in script
+    assert '"ref":"main"' in script
+    assert '"revision":"${REVISION}"' in script
+    dispatch = workflow["jobs"]["dispatch"]
+    assert "github.event_name == 'workflow_dispatch'" in dispatch["if"]
+    assert "startsWith(github.event.comment.body, '/ci')" in dispatch["if"]
+
+
+def test_failed_label_update_prevents_dispatch():
+    github = FakeGitHub()
+    github.repo_api = lambda path, **kwargs: (
+        (_ for _ in ()).throw(API.GitHubError("label update rejected"))
+        if path == "issues/42/labels" and kwargs.get("method") == "POST"
+        else FakeGitHub.repo_api(github, path, **kwargs)
+    )
+    with pytest.raises(API.GitHubError):
+        SLASH.handle(COMMENT_EVENT, PLATFORMS, github)
+    assert not any(call[1] == "issues/42/comments" for call in github.writes())
+
+
+def test_new_ci_command_cancels_old_head_before_dispatching():
+    github = FakeGitHub()
+    github.runs = [
+        {
+            "id": 111,
+            "head_sha": "b" * 40,
+            "status": "queued",
+            "event": "pull_request",
+            "pull_requests": [{"number": 42}],
+        },
+        {
+            "id": 222,
+            "head_sha": "b" * 40,
+            "status": "completed",
+            "event": "pull_request",
+            "pull_requests": [{"number": 42}],
+        },
+        {
+            "id": 333,
+            "head_sha": SHA,
+            "status": "in_progress",
+            "event": "pull_request",
+            "pull_requests": [{"number": 42}],
+        },
+        {"id": 444, "head_sha": "c" * 40, "status": "in_progress", "event": "push"},
+        {
+            "id": 555,
+            "head_sha": "d" * 40,
+            "status": "in_progress",
+            "event": "workflow_dispatch",
+            "pull_requests": [{"number": 42}],
+        },
+        {
+            "id": 666,
+            "head_sha": "e" * 40,
+            "status": "queued",
+            "event": "pull_request",
+            "pull_requests": [{"number": 43}],
+        },
+    ]
+    SLASH.handle(COMMENT_EVENT, PLATFORMS, github)
+    cancel_at = next(
+        index
+        for index, call in enumerate(github.calls)
+        if call[1] == "actions/runs/111/cancel"
+    )
+    dispatch_at = next(
+        index
+        for index, call in enumerate(github.calls)
+        if call[0] == "command" and call[1][:2] == ("workflow", "run")
+    )
+    assert cancel_at < dispatch_at
+    assert any(call[1] == "actions/runs/555/cancel" for call in github.writes())
+    assert not any("222/cancel" in call[1] for call in github.writes())
+    assert not any("333/cancel" in call[1] for call in github.writes())
+    assert not any("444/cancel" in call[1] for call in github.writes())
+    assert not any("666/cancel" in call[1] for call in github.writes())
+
+
+def test_trusted_dispatch_input_resolves_the_current_open_head(tmp_path, monkeypatch):
+    event = {
+        "repository": {"full_name": REPOSITORY},
+        "event_name": "workflow_dispatch",
+        "inputs": {"pr_number": "42", "platforms": "cuda"},
+    }
+    output = tmp_path / "output"
+    output.touch()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(event))
+    real_github = SLASH.GitHub
+    fake = FakeGitHub()
+    SLASH.GitHub = lambda repository: fake
+    try:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["slash_command.py", "--event-file", str(path)],
+        )
+        assert SLASH.main() == 0
+    finally:
+        SLASH.GitHub = real_github
+    assert output.read_text() == (
+        f"pr_number=42\nrevision={SHA}\nrequested_platforms=cuda\n"
+    )
+    assert fake.pr["head"]["sha"] == SHA
+    assert not fake.writes()
+    assert not _slash_event_dispatch(fake)
+
+
+@pytest.mark.parametrize(
+    "pr, platforms",
+    [
+        ({"state": "closed", "head": {"sha": SHA}}, "cuda"),
+        ({"state": "open", "head": {"sha": "main"}}, "cuda"),
+        ({"state": "open", "head": {"sha": SHA}}, "missing"),
+    ],
+)
+def test_trusted_dispatch_rejects_untrusted_inputs(
+    tmp_path, monkeypatch, pr, platforms
+):
+    event = {
+        "repository": {"full_name": REPOSITORY},
+        "event_name": "workflow_dispatch",
+        "inputs": {"pr_number": "42", "platforms": platforms},
+    }
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(event))
+    output = tmp_path / "output"
+    output.touch()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    fake = FakeGitHub()
+    fake.pr = pr
+    real_github = SLASH.GitHub
+    SLASH.GitHub = lambda repository: fake
+    try:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["slash_command.py", "--event-file", str(path)],
+        )
+        assert SLASH.main() == 1
+    finally:
+        SLASH.GitHub = real_github
+    assert output.read_text() == ""
+    assert not fake.writes()
 
 
 def test_all_command_labels_and_dispatches_full_matrix():
@@ -234,17 +421,6 @@ def test_unavailable_pr_cannot_dispatch(state):
         with pytest.raises(ValueError):
             SLASH.handle(COMMENT_EVENT, PLATFORMS, github)
     assert not github.writes()
-
-
-def test_failed_dispatch_does_not_claim_success():
-    github = FakeGitHub()
-    github.fail_dispatch = True
-    with pytest.raises(API.GitHubError):
-        SLASH.handle(COMMENT_EVENT, PLATFORMS, github)
-    assert not any(call[1].startswith("issues/42/labels") for call in github.writes())
-    assert not any(
-        call[1].endswith(("/comments", "/reactions")) for call in github.writes()
-    )
 
 
 @pytest.mark.parametrize(

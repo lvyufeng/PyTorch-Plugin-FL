@@ -17,7 +17,11 @@
 CI platform matrix generator with changed-file filtering and label routing.
 
 For schedule / push: returns all configured platforms.
-For workflow_dispatch: uses ``--dispatch-platforms`` (``all`` by default).
+For workflow_dispatch without a PR number: uses ``--dispatch-platforms``
+(``all`` by default).
+For a trusted workflow_dispatch of a PR: uses its labels and changed files.
+The current PR head is compared with the current base, so a stale dispatch
+cannot select hardware for an earlier commit.
 For pull_request:
   1. If a PR label matches ``platform:<name>``   → run only that platform.
   2. If a PR label matches ``platform:all``       → run all platforms.
@@ -43,7 +47,9 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -53,6 +59,48 @@ import yaml
 _NON_PLATFORM_STEMS: frozenset[str] = frozenset(
     ("template", "image_sources", "platforms")
 )
+CI_INFRA_PATHS = (
+    ".github/scripts/ci/",
+    ".github/workflows/agnostic-checks.yml",
+    ".github/workflows/build-wheel.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/codegen-checks.yml",
+    ".github/workflows/integration-tests.yml",
+    ".github/workflows/lint.yml",
+    ".github/workflows/load-platform-config.yml",
+    ".github/workflows/build-wheel-common.yml",
+    ".github/workflows/slash-command.yml",
+    "setup.py",
+    "pyproject.toml",
+    "CMakeLists.txt",
+)
+OWNER = re.compile(r"[1-9][0-9]*-[1-9][0-9]*")
+
+
+def _publish_common(revision, owner):
+    """Publish after routing succeeds and the exact PR head was checked."""
+    if not os.environ.get("GH_TOKEN"):
+        return
+    if not OWNER.fullmatch(owner):
+        raise ValueError("workflow owner must be a run and attempt")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("repository must be owner/name")
+    subprocess.run(
+        [
+            sys.executable,
+            str(pathlib.Path(__file__).with_name("ci_concurrency.py")),
+            "--repository",
+            repository,
+            "publish-common",
+            "--revision",
+            revision,
+            "--owner",
+            owner,
+        ],
+        check=True,
+        env=os.environ.copy(),
+    )
 
 
 def _load_platforms(configs_dir: pathlib.Path) -> list[str]:
@@ -99,12 +147,20 @@ def _platforms_from_files(
     all_platforms: list[str],
     configs_dir: pathlib.Path,
 ) -> list[str]:
+    return _select_from_files(changed, all_platforms, configs_dir)
+
+
+def _select_from_files(
+    changed: list[str] | None,
+    all_platforms: list[str],
+    configs_dir: pathlib.Path,
+) -> list[str]:
     if changed is None:
         return all_platforms
     code = [
         path
         for path in changed
-        if not path.startswith("docs/") and not path.endswith((".md", ".rst"))
+        if not path.startswith("docs/") and not path.lower().endswith((".md", ".rst"))
     ]
     if not code:
         return []
@@ -129,6 +185,14 @@ def _platforms_from_files(
                 file=sys.stderr,
             )
             return all_platforms
+    # Pipeline code is common to every platform. Restricting a change there
+    # to a vendor that happens to list it in paths_watch would skip the others.
+    shared_ci = any(
+        any(_matches(path, pattern) for pattern in CI_INFRA_PATHS) for path in code
+    )
+    if shared_ci:
+        return all_platforms
+
     selected = set()
     for path in code:
         affected = {
@@ -216,7 +280,22 @@ def main() -> None:
     parser.add_argument(
         "--dispatch-platforms",
         default="",
-        help="Comma-separated platforms for workflow_dispatch; empty means all",
+        help="Comma-separated platforms for a branch workflow_dispatch",
+    )
+    parser.add_argument(
+        "--pr-number",
+        default="",
+        help="PR number when a trusted dispatch tests a pull request",
+    )
+    parser.add_argument(
+        "--workflow-run",
+        default="",
+        help="Workflow run that owns a PR's shared-check publication",
+    )
+    parser.add_argument(
+        "--workflow-attempt",
+        default="",
+        help="Workflow attempt that owns a PR's shared-check publication",
     )
     args = parser.parse_args()
 
@@ -236,7 +315,37 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if args.event_name == "workflow_dispatch":
+    if args.pr_number and (
+        not args.pr_number.isascii()
+        or not args.pr_number.isdigit()
+        or args.pr_number != str(int(args.pr_number))
+        or int(args.pr_number) <= 0
+    ):
+        print("::error::PR number must be a positive integer", file=sys.stderr)
+        sys.exit(2)
+    if args.pr_number and not args.workflow_attempt:
+        args.workflow_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    if args.pr_number and (
+        not args.workflow_run.isascii()
+        or not args.workflow_run.isdigit()
+        or args.workflow_run != str(int(args.workflow_run))
+        or int(args.workflow_run) <= 0
+        or not args.workflow_attempt.isascii()
+        or not args.workflow_attempt.isdigit()
+        or int(args.workflow_attempt) <= 0
+        or args.workflow_attempt != str(int(args.workflow_attempt))
+    ):
+        print(
+            "::error::PR shared-check owner must be a positive run id and attempt",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not args.pr_number and args.event_name == "pull_request":
+        print("::error::PR routing requires a PR number", file=sys.stderr)
+        sys.exit(2)
+    if args.event_name == "workflow_dispatch" and not args.pr_number:
+        if not args.dispatch_platforms:
+            args.dispatch_platforms = "all"
         try:
             selected = _platforms_from_dispatch(
                 args.dispatch_platforms,
@@ -248,8 +357,8 @@ def main() -> None:
         print(f"platforms={json.dumps(selected)}")
         return
 
-    # Other non-PR events always run the full matrix.
-    if args.event_name != "pull_request":
+    # Other branch events always run the full matrix.
+    if args.event_name != "pull_request" and not args.pr_number:
         print(f"platforms={json.dumps(all_platforms)}")
         return
 
@@ -257,6 +366,11 @@ def main() -> None:
     labels = [lb.strip() for lb in args.pr_labels.split(",") if lb.strip()]
     label_platforms = _platforms_from_labels(labels, all_platforms)
     if label_platforms is not None:
+        if args.pr_number:
+            _publish_common(
+                args.head_sha,
+                f"{args.workflow_run}-{args.workflow_attempt}",
+            )
         print(f"platforms={json.dumps(label_platforms)}")
         return
 
@@ -266,6 +380,11 @@ def main() -> None:
     else:
         changed = _changed_files(args.base_ref, args.base_sha, args.head_sha)
     selected = _platforms_from_files(changed, all_platforms, configs_dir)
+    if args.pr_number:
+        _publish_common(
+            args.head_sha,
+            f"{args.workflow_run}-{args.workflow_attempt}",
+        )
     print(f"platforms={json.dumps(selected)}")
 
 

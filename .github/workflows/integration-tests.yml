@@ -61,6 +61,16 @@ on:
         required: false
         type: string
         default: ''
+      pr_number:
+        description: Pull request whose hardware is being admitted
+        required: false
+        type: string
+        default: ''
+      revision:
+        description: PR head commit bound to hardware delivery
+        required: false
+        type: string
+        default: ''
     secrets:
       FLAGCICD_API_TOKEN:
         description: Optional token for publishing pytest results and Python coverage to FlagCICD
@@ -76,6 +86,11 @@ on:
         type: string
 
 jobs:
+  # The caller's native concurrency group stops the durable shared-check job
+  # before it publishes a superseded result. Platform lanes are not serialized:
+  # each can use its own runner while the others are still queued. Admission
+  # also rechecks the run when a runner is assigned, because GitHub can leave
+  # an already-started reusable job running after its caller is cancelled.
   configuration:
     uses: ./.github/workflows/load-platform-config.yml
     with:
@@ -83,9 +98,52 @@ jobs:
       checkout_repository: ${{ inputs.checkout_repository }}
       checkout_ref: ${{ inputs.checkout_ref }}
 
+  admission:
+    name: Admit hardware
+    if: ${{ inputs.pr_number != '' && inputs.revision != '' }}
+    needs: configuration
+    concurrency:
+      group: CI-admission-${{ inputs.pr_number }}-${{ inputs.platform }}
+      cancel-in-progress: true
+    outputs:
+      claimed: ${{ steps.claim.outputs.claimed }}
+    permissions:
+      actions: read
+      contents: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Claim this revision's platform lane
+        id: claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVISION: ${{ inputs.revision }}
+          SOURCE_REPOSITORY: ${{ inputs.checkout_repository }}
+          SOURCE_REF: ${{ inputs.checkout_ref }}
+          OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ "$SOURCE_REPOSITORY" != "$GITHUB_REPOSITORY" || "$SOURCE_REF" != "$REVISION" ]]; then
+            echo "::error::The admission source does not match the tested revision."
+            exit 1
+          fi
+          if python .github/scripts/ci/ci_concurrency.py \
+            --repository "$GITHUB_REPOSITORY" admit \
+            --revision "$REVISION" \
+            --pull-request "$PR_NUMBER" \
+            --owner "$OWNER"; then
+            printf 'claimed=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'claimed=false\n' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
   integration-tests:
     name: Build and test (${{ needs.configuration.outputs.display_name }})
-    needs: configuration
+    needs: [admission, configuration]
+    if: ${{ inputs.pr_number == '' || needs.admission.outputs.claimed == 'true' }}
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
     timeout-minutes: ${{ fromJson(needs.configuration.outputs.integration_timeout_minutes) }}
     container:
@@ -102,6 +160,23 @@ jobs:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || github.ref }}
           persist-credentials: false
+
+      # Recheck immediately before the build when GitHub has assigned a
+      # hardware runner. Admission also uses this script from the base branch.
+      - name: Verify this run still owns hardware delivery
+        if: ${{ inputs.pr_number != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVISION: ${{ inputs.revision }}
+          OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/ci/ci_concurrency.py \
+            --repository "$GITHUB_REPOSITORY" should-run \
+            --revision "$REVISION" \
+            --pull-request "$PR_NUMBER" \
+            --owner "$OWNER"
 
       # Discard host leftovers before restoring the managed pip download cache.
       - name: Reset pip cache dir
@@ -349,3 +424,46 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}
+
+  publish-hardware:
+    name: Publish hardware result
+    if: ${{ always() && needs.admission.outputs.claimed == 'true' }}
+    needs: [admission, integration-tests]
+    permissions:
+      contents: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted result publisher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Publish this platform's outcome
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVISION: ${{ inputs.revision }}
+          SOURCE_REPOSITORY: ${{ inputs.checkout_repository }}
+          SOURCE_REF: ${{ inputs.checkout_ref }}
+          OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
+          PLATFORM: ${{ inputs.platform }}
+          HARDWARE_RESULT: ${{ needs.integration-tests.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$SOURCE_REPOSITORY" != "$GITHUB_REPOSITORY" || "$SOURCE_REF" != "$REVISION" ]]; then
+            echo "::error::The hardware source does not match the tested revision."
+            exit 1
+          fi
+          case "$HARDWARE_RESULT" in
+            success|failure) ;;
+            *) HARDWARE_RESULT=error ;;
+          esac
+          python .github/scripts/ci/ci_concurrency.py \
+            --repository "$GITHUB_REPOSITORY" publish-hardware \
+            --revision "$REVISION" \
+            --result "$HARDWARE_RESULT" \
+            --owner "$OWNER" \
+            --platform "$PLATFORM"
