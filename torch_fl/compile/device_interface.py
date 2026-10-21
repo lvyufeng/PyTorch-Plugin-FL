@@ -788,6 +788,43 @@ def _repair_stock_cuda_interface() -> None:
             torch.cuda.get_device_properties
         )
 
+    # `Worker.get_device_properties` is the same problem one layer down, and it
+    # is the one dynamo itself calls. The class snapshots it at import time too,
+    # and its body is a comprehension over `range(torch.cuda.device_count())`
+    # that asks stock `torch.cuda.get_device_properties` about every device --
+    # `_lazy_init()` included -- whatever this class's own getter now is.
+    # `torch.utils._triton.has_triton()` reaches it through `cuda_extra_check`
+    # (`Worker.get_device_properties().major >= 7`), and `record_compilation_
+    # metrics` through `has_triton()`, so on a native accelerator a dynamo that
+    # asks before the stack is set up gets `AssertionError: Torch not compiled
+    # with CUDA enabled` out of the middle of a trace. Rebuild it from the
+    # module's own getter, which is the flagos answer on a flagos build, and
+    # keep dynamo's per-device cache so repeated calls stay cheap.
+    worker = getattr(di.CudaInterface, "Worker", None)
+    if (
+        worker is not None
+        and getattr(worker, "_flagos_properties", None)
+        is not torch.cuda.get_device_properties
+    ):
+        properties = torch.cuda.get_device_properties
+        device_count = torch.cuda.device_count
+
+        def get_device_properties(device=None):
+            if isinstance(device, str):
+                device = torch.device(device)
+            if isinstance(device, torch.device):
+                device = device.index
+            if device is None:
+                device = di.CudaInterface.Worker.current_device()
+            if "cuda" not in caching_worker_device_properties:
+                caching_worker_device_properties["cuda"] = [
+                    properties(index) for index in range(device_count())
+                ]
+            return caching_worker_device_properties["cuda"][device]
+
+        worker.get_device_properties = staticmethod(get_device_properties)
+        worker._flagos_properties = properties
+
     if platform_profile().is_cuda_like and _torch_has_cuda_kernels():
         return
 
@@ -816,50 +853,91 @@ def _prime_has_triton() -> None:
     condition is then `has_triton_package() and flagos.device_count() > 0`,
     which is the same contract as xpu/mtia and all that holds on Ascend (there
     is no compute-capability floor; the toolchain accepts the SoC or refuses it
-    at compile time). "cuda" is masked out for the duration so the probe cannot
-    fall into `CudaInterface.Worker.get_device_properties`, which walks *every*
-    device.
+    at compile time).
+
+    "cuda" stays in the table rather than being masked out. It used to be masked
+    because its check walks every device through
+    `CudaInterface.Worker.get_device_properties`, which was stock torch's;
+    `_repair_stock_cuda_interface` now rebuilds that from the flagos getter, so
+    the row answers for this device instead of failing. Leaving it in is what
+    makes the priming do what this docstring says: `Scheduler.create_backend`
+    asks the cached `has_triton()`, and a cache filled with False because the
+    cuda row raised is the `TritonMissing` this function exists to prevent.
 
     Only the answer is primed, not forced: with no Triton installed the real
     check still returns False, and that False is what gets memoized.
+
+    Idempotent, and the compile backend calls it before every compile_fx. On a
+    native accelerator the first call replaces `has_triton` with the plain
+    `has_native_triton` override (see the end of
+    `register_flagos_device_interface`), so there is no cache left to prime from
+    the second call on, and nothing to gain from one.
     """
     if platform_profile().is_cuda_like:
         return
 
     from torch.utils import _triton
 
-    # On a native accelerator this function has already been replaced outright by
-    # the `has_native_triton` override installed at the end of
-    # register_flagos_device_interface(), which is a plain function and answers
-    # True unconditionally. There is no cache left to prime, and nothing to gain
-    # from priming one: `cache_info` is absent, so probing it raises. This is the
-    # second and every later call -- `import torch_fl` registers once, and the
-    # compile backend re-registers before each compile_fx.
     cache_info = getattr(_triton.has_triton, "cache_info", None)
-    if cache_info is None:
-        return
-
-    if cache_info().currsize:
+    if cache_info is not None:
+        if cache_info().currsize:
+            return
+    elif not is_native_accelerator():
+        # Neither a cache to prime nor an override to install: nothing here can
+        # change the answer.
         return
 
     import torch._dynamo.device_interface as di
 
-    class _Unavailable(DeviceInterface):
-        @staticmethod
-        def is_available() -> bool:
-            return False
-
     # Populate the built-in table first; otherwise has_triton's own lookup runs
     # init_device_reg() and overwrites the entries installed below.
     di.get_interface_for_device("cuda")
+    di.get_interface_for_device("cpu")
 
     saved = {name: di.device_interfaces[name] for name in ("cuda", "xpu")}
-    di.device_interfaces["cuda"] = _Unavailable
     di.device_interfaces["xpu"] = FlagOSDeviceInterface
     try:
-        _triton.has_triton()
+        if cache_info is not None:
+            _triton.has_triton()
+        # The native override below replaces the canonical helper; inductor's
+        # own copies of it, and the device table read above, are what the rest
+        # of the run consults, so hand those the same answer now rather than
+        # waiting for the caller at the end of the function to do it.
+        _install_native_triton_override()
     finally:
         di.device_interfaces.update(saved)
+
+
+def _install_native_triton_override() -> None:
+    """Make `has_triton()` answer True on a native accelerator.
+
+    PyTorch's helper only knows CUDA/XPU/CPU/PrivateUse1, and the CPU wheel's
+    CUDA probe is false even though the vendor runtime owns PrivateUse1. The
+    interface is already registered by the time this runs, and setting up the
+    inductor stack is exactly the evidence the helper is asking for -- so the
+    answer is a plain True. Inductor imports the helper into several modules, so
+    every bound reference is replaced as well as the canonical one.
+
+    Idempotent: the one override is rebuilt and re-installed on each call, which
+    is how a later `import torch._inductor.*` picks it up.
+    """
+
+    def has_native_triton() -> bool:
+        return True
+
+    from torch.utils import _triton as triton_utils
+
+    triton_utils.has_triton = has_native_triton  # type: ignore[assignment]
+    import sys
+
+    for module_name in (
+        "torch._inductor.scheduler",
+        "torch._inductor.compile_fx",
+        "torch._inductor.async_compile",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "has_triton"):
+            module.has_triton = has_native_triton
 
 
 def _torch_has_cuda_kernels() -> bool:
@@ -1100,24 +1178,6 @@ def register_flagos_device_interface() -> None:
         triton_utils.has_triton.cache_clear()
 
         if is_native_accelerator() and triton_utils.has_triton_package():
-            # PyTorch's helper only knows CUDA/XPU/PrivateUse1 at import time;
-            # the CPU wheel's CUDA probe is false even though the vendor runtime
-            # owns PrivateUse1. Inductor imports this helper into several
-            # modules, so update those bound references as well as the canonical
-            # helper.
-            def has_native_triton() -> bool:
-                return True
-
-            triton_utils.has_triton = has_native_triton
-            import sys
-
-            for module_name in (
-                "torch._inductor.scheduler",
-                "torch._inductor.compile_fx",
-                "torch._inductor.async_compile",
-            ):
-                module = sys.modules.get(module_name)
-                if module is not None and hasattr(module, "has_triton"):
-                    module.has_triton = has_native_triton
+            _install_native_triton_override()
     except (ImportError, AttributeError):
         pass
