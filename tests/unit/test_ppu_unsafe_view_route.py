@@ -54,5 +54,5 @@ def test_ppu_contract_failures_are_regenerable_boxing_exceptions():
         if line and "=" in line:
             op, backend = (part.strip() for part in line.split("=", 1))
             routes[op] = backend
-    assert routes["_unsafe_view"] == "cuda"
-    assert routes["slice.Tensor"] == "cuda"
+    assert routes["_unsafe_view"] == "boxing"
+    assert routes["slice.Tensor"] == "boxing"

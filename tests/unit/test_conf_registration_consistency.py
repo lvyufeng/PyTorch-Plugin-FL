@@ -226,12 +226,16 @@ def test_every_route_uses_an_allowed_backend_key(platform):
     ``Backend`` enum value at runtime.
     """
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
-    vendor_key = "cuda" if platform in BOXING_PLATFORMS else platform
+    # A boxing platform's fallback slot is spelled "boxing", not "cuda": the
+    # two name different things (borrow ATen's CUDA kernel through
+    # DeviceBoxingGuard vs run it on a real NVIDIA device). `cuda` stays
+    # accepted so a conf written before the split still parses.
+    vendor_key = ("boxing", "cuda") if platform in BOXING_PLATFORMS else (platform,)
     allowed = {
         "flaggems_cpp",
         "flaggems",
         "tileops",
-        vendor_key,
+        *vendor_key,
         "none",
         "flagos_python",
     }
@@ -468,16 +472,16 @@ def test_conf_route_counts_are_stable():
         # copy_func kernel the FlagGems `_ascend` flip override builds.
         "ascend": {"flaggems": 221, "none": 1659, "ascend": 157},
         "bpu": {},
-        # 24 ops moved from flaggems to cuda: the conf writer now excludes
+        # 24 ops moved from flaggems to boxing: the conf writer now excludes
         # flaggems_recursive_fallback | flaggems_runtime_broken, which it could
         # not see before the sets were moved above the emitter. On a boxing-off
-        # wheel -- the default -- GetFn(kCuda) degrades to the FlagGems Python
+        # wheel -- the default -- GetFn(kBoxing) degrades to the FlagGems Python
         # path, so this is a no-op there; on a FLAGOS_BUILD_BOXING=ON wheel the
         # ops now reach their boxing kernel instead of the FlagGems route.
         # `_unsafe_view`, `unsqueeze`, `unsqueeze_` and `transpose.int` were
         # separately kept off the FlagGems route for view semantics and cost.
-        "cuda": {"flaggems": 390, "cuda": 1644},
-        "dcu": {"flaggems": 454, "cuda": 1583},
+        "cuda": {"flaggems": 390, "boxing": 1644},
+        "dcu": {"flaggems": 454, "boxing": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -502,10 +506,10 @@ def test_conf_route_counts_are_stable():
         # cannot steer -- the two failures the CI lane reported.
         "kunlunxin": {"kunlunxin": 57, "none": 1980},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
-        "metax": {"flaggems": 594, "cuda": 1433, "flaggems_cpp": 10},
+        "metax": {"flaggems": 594, "boxing": 1433, "flaggems_cpp": 10},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
-        "ppu": {"flaggems": 592, "cuda": 1445},
+        "ppu": {"flaggems": 592, "boxing": 1445},
         # Iluvatar adds a native, non-boxing vendor slot on top of FlagGems
         # (scripts/codegen/codegen_iluvatar.py). Its counts are DERIVED, not
         # pinned: the native cohort is a moving measurement -- the first landing

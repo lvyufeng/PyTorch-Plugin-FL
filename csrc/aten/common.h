@@ -21,7 +21,22 @@ namespace at::native::flagos {
 // never stored in the BackendTable and never returned by GetBackendForOp.
 // Keep it last so the real backends stay contiguous.
 enum class Backend {
+  // ATen's own CUDA kernel, reached on a real NVIDIA device. Distinct from
+  // kBoxing: this one runs the CUDA kernel on a CUDA tensor, with no flagos
+  // device involved. Nothing registers here yet -- the generated
+  // cuda_kernels.cc is entirely boxing -- so a conf naming `cuda` currently
+  // resolves to an empty slot and degrades (see Dispatcher::GetFn).
   kCuda,
+  // The CUDA-boxing path: DeviceBoxingGuard retags a flagos tensor to
+  // DispatchKey::CUDA, ATen's CUDA kernel runs, UnboxToFlagos retags the
+  // result. Compiled only when FLAGOS_BUILD_BOXING=ON, which is not the
+  // default for any platform.
+  //
+  // This used to share the `cuda` key with kCuda above, which made the conf
+  // unable to say which of the two it meant: a reader could not tell "run the
+  // vendor's CUDA kernel" from "borrow CUDA's kernel through boxing", and the
+  // empty-slot degrade could not distinguish them either.
+  kBoxing,
   kFlagGemsCpp,    // FlagGems C++ runtime (liboperators.so, conf key: flaggems_cpp)
   kFlagGems,       // FlagGems Python/Triton path (conf key: flaggems)
   kAscend,
@@ -51,8 +66,11 @@ enum class Backend {
 //   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
 //            "flaggems"     -- FlagGems Python (Triton) path
 //            "tileops"      -- TileOps Triton shims
-//            "<vendor>"     -- vendor-native kernel (cuda | ascend | musa |
-//                              metax | gcu | tsingmicro | kunlunxin | iluvatar)
+//            "boxing"       -- CUDA-boxing (DeviceBoxingGuard + ATen CUDA kernel);
+//                              only a FLAGOS_BUILD_BOXING=ON build has it
+//            "cuda"         -- ATen's own CUDA kernel on a real NVIDIA device
+//            "<vendor>"     -- vendor-native kernel (ascend | musa | metax | gcu |
+//                              tsingmicro | kunlunxin | iluvatar)
 //            "none"         -- no accelerated impl; reaches cpu_fallback
 // Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);

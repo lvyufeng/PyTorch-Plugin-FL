@@ -2356,7 +2356,9 @@ def main():
             if not line or "=" not in line:
                 continue
             op, backend = line.split("=", 1)
-            if backend.strip() == "cuda":
+            # `boxing` is the key these confs use for the CUDA-boxing path; `cuda`
+            # is accepted as well so this still reads a conf predating the split.
+            if backend.strip() in ("boxing", "cuda"):
                 ops.append(op.strip())
         print(f"Found {len(ops)} ops in backends_cuda.conf")
 
@@ -2552,7 +2554,11 @@ def main():
         i = op_info[op]
         kn = kernel_name(i["fn_type"])
         lines.append(
-            f"REGISTER_IMPL_TO_DISPATCHER({i['fn_type']}, {i['dispatcher']}, Backend::kCuda, {kn})"
+            # kBoxing, not kCuda: every kernel in this file is a
+            # DeviceBoxingGuard wrapper around ATen's CUDA kernel, i.e. the
+            # boxing path. kCuda means the vendor's own CUDA kernel running on a
+            # real NVIDIA device, which nothing here produces.
+            f"REGISTER_IMPL_TO_DISPATCHER({i['fn_type']}, {i['dispatcher']}, Backend::kBoxing, {kn})"
         )
     lines.append("")
     lines.append("} // namespace at::native::flagos")
@@ -3167,11 +3173,15 @@ def main():
         # the enumerated per-op list and the wheel-level decision are tracked in
         # the follow-up issue.
         n_flaggems_routes = 0
-        n_cuda_fallback = 0
+        n_boxing_fallback = 0
         n_metadata_override = 0
+        # "boxing", not "cuda": an op taken off the FlagGems route is served by
+        # the CUDA-boxing kernel (DeviceBoxingGuard + ATen's CUDA kernel), which
+        # is what `boxing` names. `cuda` is reserved for ATen's own CUDA kernel
+        # on a real NVIDIA device, which this generator does not emit.
         for op in sorted(op_info):
             if op in metadata_route_overrides:
-                backend = "cuda"
+                backend = "boxing"
                 if op in flaggems_py:
                     n_metadata_override += 1
             elif (
@@ -3179,14 +3189,11 @@ def main():
                 or op in measured_flaggems_rollback
                 or op in flaggems_forced_cuda
             ):
-                backend = "cuda"
+                backend = "boxing"
                 if op in flaggems_py:
-                    n_cuda_fallback += 1
-                backend = "cuda"
-                if op in flaggems_py:
-                    n_cuda_fallback += 1
+                    n_boxing_fallback += 1
             else:
-                backend = "flaggems" if op in flaggems_py else "cuda"
+                backend = "flaggems" if op in flaggems_py else "boxing"
             if backend == "flaggems":
                 n_flaggems_routes += 1
             suffix = "  # tileops" if op in TILEOPS_OPS else ""
@@ -3197,7 +3204,7 @@ def main():
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
             f"and {len(op_info) - n_flaggems_routes} cuda routes "
             f"({tileops_annotated} annotated # tileops, "
-            f"{n_cuda_fallback} flaggems ops forced back to cuda)"
+            f"{n_boxing_fallback} flaggems ops forced back to boxing)"
         )
         if n_metadata_override:
             print(

@@ -279,9 +279,15 @@ ESCAPE_NATIVE = {
 }
 
 # CUDA-boxing platforms use the same four-key shape. Their fallback kernel is the
-# CUDA boxing kernel, so the `<vendor>` slot is spelled "cuda" and it covers
+# CUDA boxing kernel, so the `<vendor>` slot is spelled "boxing" and it covers
 # every op -- which is why a boxing conf has no `none` entries while a
 # native-kernel vendor has many.
+#
+# It used to be spelled "cuda", which conflated two different things: running
+# ATen's CUDA kernel on a real NVIDIA device, and borrowing that kernel from a
+# flagos tensor through DeviceBoxingGuard. Only the second is what these confs
+# mean, only the second needs FLAGOS_BUILD_BOXING=ON, and keeping one key for
+# both left a reader -- and the empty-slot degrade -- unable to tell them apart.
 #
 #   platform -> (fallback backend key, conf naming that platform's triton gaps)
 #
@@ -312,7 +318,7 @@ BOXING_PLATFORMS = {
     # disagree about mm/bmm. Filed upstream as FlagGems issue #6225.
     "ppu": "backends_ppu.conf",
 }
-BOXING_FALLBACK = "cuda"
+BOXING_FALLBACK = "boxing"
 
 # Generated conf notes for platform-specific FlagGems fallbacks. Keep these in
 # the generator so regeneration preserves the measured diagnosis and upstream
@@ -2546,7 +2552,13 @@ def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -
         return measured & (fg_py | fg_cpp)
     table = parse_conf(conf_dir / filename)
     covered = fg_py | fg_cpp
-    return {op for op, backend in table.items() if backend == "cuda" and op in covered}
+    # Both spellings: the conf this reads back may predate the boxing/cuda
+    # split, and the round trip has to recover the same gaps either way.
+    return {
+        op
+        for op, backend in table.items()
+        if backend in {"cuda", "boxing"} and op in covered
+    }
 
 
 def boxing_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
